@@ -24,4 +24,4 @@ COPY . .
 EXPOSE 8000
 
 # Lệnh mặc định để chạy server.py (vì server.py tự nó gọi uvicorn.run)
-CMD ["python", "pythonFile/Realtime_running/server.py"]
+CMD ["python", "server.py"]

@@ -13,9 +13,9 @@ services:
     depends_on:
       - rtsp-server
     volumes:
-      # QUAN TRỌNG: Đảm bảo bạn có 2 file video ở thư mục ./sampleTest
-      - ./sampleTest/vid_test_1.mp4:/videos/vid_test_1.mp4:ro
-      - ./sampleTest/vid_test_2.mp4:/videos/vid_test_2.mp4:ro
+      # QUAN TRỌNG: Đảm bảo bạn có 2 file video ở thư mục ../../sampleTest
+      - ../../sampleTest/vid_test_1.mp4:/videos/vid_test_1.mp4:ro
+      - ../../sampleTest/vid_test_2.mp4:/videos/vid_test_2.mp4:ro
     restart: always
     entrypoint: ["/bin/sh", "-c"]
     command: >
@@ -61,11 +61,10 @@ services:
     # GHI ĐÈ LỆNH CMD CỦA DOCKERFILE
     # Chúng ta dùng "uvicorn --reload" để code tự cập nhật khi ta sửa file mẫu nâng cao
     command: >
-      uvicorn pythonFile.Realtime_running.server:app 
+      uvicorn server:app 
       --host 0.0.0.0 
       --port 8000 
-      --reload 
-      --reload-dir /app/pythonFile/
+      --reload
     
     # Kích hoạt GPU (nếu có)
     deploy:

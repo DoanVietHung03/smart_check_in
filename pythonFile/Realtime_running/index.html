@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset='utf-8'>
+    <title>Smart Check-in Server</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #121212; color: #E0E0E0; margin: 0; padding: 20px; }
+        h1 { text-align: center; color: #4CAF50; }
+        #stream-container { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; }
+        .stream-wrapper { background-color: #1E1E1E; border: 1px solid #333; border-radius: 8px; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2); overflow: hidden; }
+        .stream-wrapper h3 { text-align: center; margin: 10px 0; background-color: #252525; padding: 8px 0; border-bottom: 1px solid #333; }
+        .video-canvas { display: block; width: 100%; height: auto; background-color: #000; image-rendering: pixelated; }
+        .data-display { padding: 10px; font-size: 1.1em; font-weight: bold; color: #4CAF50; text-align: center; }
+    </style>
+</head>
+<body>
+    <h1>Hệ thống Check-in Thông minh (Phiên bản Server)</h1>
+    <div id="stream-container">
+        </div>
+    
+    <script src="/static/main.js"></script>
+</body>
+</html>

@@ -29,4 +29,4 @@ COPY checkpoints /app/checkpoints
 EXPOSE 8000
 
 # Lệnh mặc định để chạy Realtime_running.py
-CMD ["python", "-m", "Realtime_running.server"]
+CMD ["python", "-m", "pythonFile.Realtime_running.server"]

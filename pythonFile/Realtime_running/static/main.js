@@ -1,94 +1,105 @@
-// static/main.js
-
-document.addEventListener("DOMContentLoaded", () => {
-    console.log("DOM loaded. Initializing WebSocket connections...");
-
-    // Mảng này sẽ được thay thế bởi server (server.py)
-    const STREAM_IDS = ['STREAM_IDS_PLACEHOLDER'];
-
-    if (STREAM_IDS[0] === 'STREAM_IDS_PLACEHOLDER') {
-        console.error("Lỗi: Server chưa chèn Stream IDs. Kiểm tra file server.py, hàm get_js.");
+document.addEventListener('DOMContentLoaded', function() {
+    const videoContainer = document.querySelector('.video-container');
+    if (!videoContainer) {
+        console.error("Container chính không tìm thấy!");
         return;
     }
+    
+    // Đọc số lượng stream từ thẻ HTML (được tạo bởi Python)
+    const stream_count = parseInt(videoContainer.dataset.streamCount, 10);
+    const contexts = new Map(); 
 
-    // Lặp qua từng ID stream và kết nối
-    STREAM_IDS.forEach(streamId => {
-        const canvas = document.getElementById(`video-canvas-${streamId}`);
-        const dataDisplay = document.getElementById(`data-display-${streamId}`);
-        
-        if (!canvas || !dataDisplay) {
-            console.error(`Không tìm thấy phần tử HTML cho stream ${streamId}`);
+    /**
+     * Hàm render danh sách nhận diện vào sidebar
+     * Hàm này sẽ xóa sidebar cũ và tạo lại toàn bộ
+     */
+    const renderIdentitySidebar = (stream_id, identities) => {
+        const sidebar = document.getElementById(`identity-sidebar-${stream_id}`);
+        if (!sidebar) return;
+
+        // Xóa sạch nội dung sidebar cũ để cập nhật danh sách mới nhất
+        sidebar.innerHTML = ''; 
+
+        if (identities.length === 0) {
+            sidebar.innerHTML = '<p class="sidebar-empty">Không có ai được nhận diện.</p>';
             return;
         }
 
-        const ctx = canvas.getContext("2d");
-        const img = new Image();
+        // Tạo thẻ (card) cho mỗi người được nhận diện
+        identities.forEach(person => {
+            // Tạo div bao ngoài
+            const card = document.createElement('div');
+            card.className = 'identity-card';
 
-        // Xử lý khi ảnh (frame) được tải xong
-        img.onload = () => {
-            // Đảm bảo canvas có cùng kích thước với ảnh nhận được
-            if (canvas.width !== img.width || canvas.height !== img.height) {
-                canvas.width = img.width;
-                canvas.height = img.height;
-            }
-            // Vẽ frame lên canvas
-            ctx.drawImage(img, 0, 0);
-        };
-        
-        img.onerror = (e) => {
-            console.error(`Lỗi tải ảnh Base64 cho stream ${streamId}:`, e);
-        };
+            // Tạo thẻ ảnh thumbnail
+            const img = document.createElement('img');
+            img.src = "data:image/jpeg;base64," + person.thumb; // Lấy thumbnail base64
+            img.className = 'identity-thumb';
 
-        // Hàm kết nối WebSocket
-        function connectWebSocket() {
-            // Lấy giao thức (ws:// hoặc wss://)
-            const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-            const wsUrl = `${wsProtocol}${window.location.host}/ws/${streamId}`;
-            console.log(`Đang kết nối tới stream ${streamId} tại: ${wsUrl}`);
+            // Tạo thẻ tên
+            const nameTag = document.createElement('p');
+            nameTag.className = 'identity-name';
+            nameTag.innerText = person.name;
+            
+            // QUAN TRỌNG: Áp dụng màu sắc (đã được server gửi ở định dạng CSS)
+            nameTag.style.color = person.color;
 
-            const socket = new WebSocket(wsUrl);
+            card.appendChild(img);
+            card.appendChild(nameTag);
+            sidebar.appendChild(card);
+        });
+    };
 
-            socket.onopen = () => {
-                console.log(`WebSocket đã kết nối cho stream ${streamId}.`);
-                dataDisplay.textContent = "Đã kết nối...";
-                dataDisplay.style.color = "#4CAF50"; // Màu xanh
-            };
-
-            // Hàm chính: Nhận dữ liệu từ server
-            socket.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    
-                    // Cập nhật ảnh
-                    // Thêm tiền tố data URI để trình duyệt hiểu đây là ảnh JPEG base64
-                    img.src = "data:image/jpeg;base64," + data.image; 
-
-                    // Cập nhật dữ liệu (ví dụ: bộ đếm)
-                    dataDisplay.textContent = `Count: ${data.count}`;
-
-                } catch (e) {
-                    console.error(`Lỗi phân tích JSON cho stream ${streamId}:`, e);
-                }
-            };
-
-            socket.onclose = (event) => {
-                console.warn(`WebSocket đã đóng cho stream ${streamId}. Đang thử kết nối lại sau 3 giây...`, event.reason);
-                dataDisplay.textContent = "Mất kết nối. Đang thử lại...";
-                dataDisplay.style.color = "#FF9800"; // Màu cam
-                
-                // Tự động kết nối lại
-                setTimeout(connectWebSocket, 3000);
-            };
-
-            socket.onerror = (error) => {
-                console.error(`Lỗi WebSocket cho stream ${streamId}:`, error);
-                dataDisplay.textContent = "Lỗi kết nối.";
-                dataDisplay.style.color = "#F44336"; // Màu đỏ
-                socket.close(); // Đóng kết nối để kích hoạt onclose (và kết nối lại)
-            };
+    /**
+     * Hàm thiết lập kết nối WebSocket cho mỗi stream
+     */
+    const setupWebSocket = (stream_id) => {
+        const canvas = document.getElementById('video-stream-' + stream_id);
+        if (!canvas) {
+            console.error(`Canvas 'video-stream-${stream_id}' không tìm thấy!`);
+            return;
         }
+        
+        const ctx = canvas.getContext('2d', { alpha: false });
+        contexts.set(stream_id, ctx);
+        
+        const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+        const wsUrl = `${wsProtocol}${location.host}/ws/${stream_id}`;
+        const ws = new WebSocket(wsUrl);
 
-        // Bắt đầu kết nối
-        connectWebSocket();
-    });
+        ws.onmessage = async (ev) => {
+            try {
+                const data = JSON.parse(ev.data);
+
+                // 1. Vẽ khung hình video chính (như cũ)
+                const image = new Image();
+                image.onload = () => {
+                    if (ctx.canvas.width !== image.width || ctx.canvas.height !== image.height) {
+                        ctx.canvas.width = image.width;
+                        ctx.canvas.height = image.height;
+                    }
+                    ctx.drawImage(image, 0, 0);
+                };
+                image.src = 'data:image/jpeg;base64,' + data.image;
+
+                // 2. LOGIC MỚI: Render sidebar
+                // (Server không còn gửi 'count', thay vào đó là 'identities')
+                renderIdentitySidebar(data.stream_id, data.identities);
+
+            } catch (e) {
+                console.error('Lỗi xử lý tin nhắn:', e);
+            }
+        };
+
+        ws.onerror = (e) => console.error(`Lỗi WebSocket trên stream ${stream_id}:`, e);
+        ws.onclose = () => {
+            console.log(`WebSocket cho stream ${stream_id} đã đóng. Đang kết nối lại...`);
+            setTimeout(() => setupWebSocket(stream_id), 3000);
+        };
+    };
+
+    // Tạo kết nối cho mỗi stream
+    for (let i = 0; i < stream_count; i++) {
+        setupWebSocket(i);
+    }
 });

@@ -1,42 +1,46 @@
-# server.py
-import sys
+# main.py (ĐÃ TÍCH HỢP LOGIC NHẬN DẠNG KHUÔN MẶT)
+import warnings
+warnings.filterwarnings('ignore')
+
 import os
+import sys
 import cv2
+import time
+import math
 import torch
 import faiss
 import numpy as np
 from PIL import Image
-import time
+import asyncio
 import threading
 import queue
-import json
-import base64
-import asyncio
-import sqlite3
-from datetime import datetime
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
-import logging
-
-# Thiết lập logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# FastAPI & Uvicorn
 import uvicorn
+import base64
+import json
+from collections import deque
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+
+# FastAPI và các thành phần liên quan
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.concurrency import run_in_threadpool
+from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
 
-# Thư viện Detection & Tracking
-from supervision import ByteTrack, Detections
+# Các thư viện xử lý ảnh và AI
 from ultralytics import YOLO
+from supervision import ByteTrack, Detections
 
 # Hàm khởi tạo DB
-from .db_manager import db_pool, initialize_database
+from .db_manager import initialize_database, db_insert
 
-# --- Thêm đường dẫn và import các module ML ở folder Setting&Train ---
+import logging
+# ====================== LOGGING ======================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('FaceRec-Server')
+
+# === THÊM MODULES CHO FACE REC (YÊU CẦU PYTHONPATH=/app TỪ DOCKER) ===
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)  
 setting_and_train_dir = os.path.join(project_root, "Setting_and_Train")
@@ -48,237 +52,220 @@ from utils import align_face, get_transforms, load_id2name
 
 logger.info("Imports completed. Loading models...")
 
-# ==========================================================
-# 1. TẢI MODEL TOÀN CỤC (GLOBAL MODELS) VÀ CÁC THAM SỐ KHÁC 
-# ==========================================================
+# ====================== CẤU HÌNH (CONFIG) ======================
+os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp'
+
+RTSP_URLS = [
+    'rtsp://rtsp-server:8554/mystream1',
+    'rtsp://rtsp-server:8554/mystream2'
+]
+
+# IO / Model
+RESIZE_PERCENT = 50
+LOST_TRACK_BUFFER = 30
+USE_LATEST_ONLY = True
+JPEG_QUALITY = 80
+CACHE_TTL_SECONDS = 5.0 # Thời gian xóa cache
+THUMBNAIL_SIZE = (96, 96) # Kích thước cho ảnh thumbnail
+
+# ===================== TẢI MODEL TOÀN CỤC =========================
 DEVICE = torch.device(cfg.DEVICE)
 
-# 1.1. Detector
+# 1. Detector
 DETECTOR_MODEL = YOLO(cfg.DETECTOR_MODEL_PATH).to(DEVICE)
 DETECTOR_MODEL.fuse()
 logger.info("Global Face Detector (YOLO) loaded.")
 
-# 1.2. Recognizer
+# 2. Recognizer
 RECOGNIZER_MODEL = iresnet34(fp16=False).to(DEVICE)
 ckpt = torch.load(cfg.FINETUNED_MODEL_PATH, map_location=DEVICE, weights_only=True)
 RECOGNIZER_MODEL.load_state_dict(ckpt['model_state_dict'], strict=False)
 RECOGNIZER_MODEL.eval()
 logger.info("Global Face Recognizer (iResNet) loaded.")
 
-# 1.3. Gallery
+# 3. Gallery
 FAISS_INDEX = faiss.read_index(cfg.FAISS_INDEX_PATH)
 ID2NAME = load_id2name(cfg.ID2NAME_PATH)
+_, RECOG_TRANSFORM = get_transforms()
 logger.info("Global Gallery (Faiss + ID2Name) loaded.")
 
-# 1.4. Utils
-_, RECOG_TRANSFORM = get_transforms()
+# 4. Bảng màu
 NAME2COLOR = {}
 rng = np.random.default_rng(42)
 for name in set(ID2NAME.values()):
     color_rgb = tuple(int(c) for c in rng.integers(0, 255, size=3))
     NAME2COLOR[name] = (color_rgb[2], color_rgb[1], color_rgb[0]) # BGR
-NAME2COLOR["Unknown"] = (0, 0, 255)
-NAME2COLOR["Processing..."] = (192, 192, 192)
-NAME2COLOR["Error"] = (0, 255, 255)
+NAME2COLOR.update({"Unknown": (0, 0, 255), "Processing...": (192, 192, 192), "Error": (0, 255, 255)})
 
-# ==================================================
-# 2. HÀNG ĐỢI & WORKERS TOÀN CỤC (GLOBAL PIPELINE)
-# ==================================================
+# ===================== KHỞI TẠO DB =========================
+stream_ids = [i for i, _ in enumerate(RTSP_URLS)]
+try:
+    initialize_database(stream_ids)
+except Exception as e:
+    logger.error(f"Không thể khởi tạo CSDL: {e}")
+    exit()
 
-# --- Pipeline 1: Recognition Worker (Xử lý iResNet) ---
+# ====================== WORKERS NỀN (PIPELINE) ======================
+# CHÚNG TA SẼ CÓ 2 WORKER: 1 CHO RECOGNITION, 1 CHO DATABASE
+
+# --- Pipeline 1: Database Worker ---
+db_queue = queue.Queue()
+
+def db_worker():
+    while True:
+        item = db_queue.get()
+        if item is None: break
+        stream_id, detection_event = item
+        try:
+            db_insert(detection_event, stream_id)
+        except Exception as e:
+            logger.error(f"Lỗi khi insert DB cho stream {stream_id}: {e}")
+        finally:
+            db_queue.task_done()
+
+threading.Thread(target=db_worker, daemon=True).start()
+
+# --- Pipeline 2: Recognition Worker (Từ logic cũ của chúng ta) ---
 recognition_queue = queue.Queue()
-recognition_cache = {}
+recognition_cache = {} # Cache toàn cục
 cache_lock = threading.Lock()
-CACHE_TTL_SECONDS = 5.0  # Xóa cache sau 5 giây
 last_cache_clean_time = time.time()
 
-def _run_batch_recognition(frame_rgb_copy, faces_to_process):
-    """
-    Helper: Hàm này sao chép TỪ `realtime_check.py`.
-    Nó chạy trong Recognition Worker Thread.
-    """
-    current_time = time.time()
-    batch_tensors = []
-    batch_tracker_ids = []
-    
-    for tracker_id, landmark, xyxy in faces_to_process:
-        try:
-            aligned_face = align_face(frame_rgb_copy, landmark, xyxy)
-            face_tensor = RECOG_TRANSFORM(Image.fromarray(aligned_face))
-            batch_tensors.append(face_tensor)
-            batch_tracker_ids.append(tracker_id)
-        except Exception:
-            with cache_lock:
-                recognition_cache[tracker_id] = ("Error", 0.0, current_time)
-
-    if not batch_tensors:
-        return 
-
-    try:
-        batch_tensors = torch.stack(batch_tensors).to(DEVICE)
-        with torch.no_grad():
-            feats_batch = RECOGNIZER_MODEL(batch_tensors).cpu().numpy()
-        
-        faiss.normalize_L2(feats_batch)
-        scores_batch, indices_batch = FAISS_INDEX.search(feats_batch, 1)
-
-        for i, tracker_id in enumerate(batch_tracker_ids):
-            score = scores_batch[i][0]
-            idx = indices_batch[i][0]
-            name = "Unknown"
-            if score > cfg.RECOGNITION_THRESHOLD:
-                name = ID2NAME.get(idx, "Unknown")
-            
-            # CẬP NHẬT CACHE TOÀN CỤC (VỚI KHÓA)
-            with cache_lock:
-                recognition_cache[tracker_id] = (name, score, current_time)
-            
-            # Nếu nhận dạng thành công -> Gửi tới DB Worker
-            if name != "Unknown":
-                db_queue.put({
-                    "stream_id": "N/A", # Sẽ được cập nhật sau
-                    "tracker_id": tracker_id,
-                    "name": name,
-                    "score": float(score)
-                })
-
-    except Exception as e:
-        logger.error(f"[RECOG-WORKER] Lỗi batch recognition: {e}")
-        for tracker_id in batch_tracker_ids:
-            with cache_lock:
-                if tracker_id not in recognition_cache:
-                    recognition_cache[tracker_id] = ("Error", 0.0, current_time)
-
-def recognition_worker():
-    """Luồng worker chuyên dụng chỉ để chạy iResNet (tránh xung đột GPU)."""
+def recognition_worker_thread():
+    """Luồng chuyên dụng chỉ để chạy iResNet, tránh xung đột GPU."""
     logger.info("[RECOG-WORKER] Recognition worker started.")
     while True:
         try:
             item = recognition_queue.get()
-            if item is None:
-                break
+            if item is None: break
+            
             frame_copy, faces_to_process, stream_id = item
-            # Gán stream_id cho tất cả các bản ghi DB từ batch này
-            _run_batch_recognition(frame_copy, faces_to_process)
-            for face_info in faces_to_process:
-                tracker_id = face_info[0]
-                # Lấy kết quả vừa nhận dạng và gửi vào DB queue
+            current_time = time.time()
+            batch_tensors = []
+            batch_tracker_ids = []
+
+            for tracker_id, landmark, xyxy in faces_to_process:
+                try:
+                    aligned_face = align_face(frame_copy, landmark, xyxy)
+                    face_tensor = RECOG_TRANSFORM(Image.fromarray(aligned_face))
+                    batch_tensors.append(face_tensor)
+                    batch_tracker_ids.append(tracker_id)
+                except Exception:
+                    with cache_lock:
+                        recognition_cache[tracker_id] = ("Error", 0.0, current_time)
+
+            if not batch_tensors:
+                recognition_queue.task_done()
+                continue
+            
+            # Chạy Batch Inference
+            batch_tensors = torch.stack(batch_tensors).to(DEVICE)
+            with torch.no_grad():
+                feats_batch = RECOGNIZER_MODEL(batch_tensors).cpu().numpy()
+            
+            faiss.normalize_L2(feats_batch)
+            scores_batch, indices_batch = FAISS_INDEX.search(feats_batch, 1)
+
+            for i, tracker_id in enumerate(batch_tracker_ids):
+                score = scores_batch[i][0]
+                idx = indices_batch[i][0]
+                name = "Unknown"
+                if score > cfg.RECOGNITION_THRESHOLD:
+                    name = ID2NAME.get(idx, "Unknown")
+                
+                # Cập nhật Cache toàn cục
                 with cache_lock:
-                    result = recognition_cache.get(tracker_id)
-                if result and result[0] not in ["Unknown", "Processing...", "Error"]:
-                    db_queue.put({
+                    recognition_cache[tracker_id] = (name, score, current_time)
+                
+                # Nếu nhận dạng thành công -> Gửi tới DB Worker
+                if name != "Unknown":
+                    db_event = {
+                        "timestamp": datetime.now(), # Lấy thời gian hiện tại
                         "stream_id": stream_id,
                         "tracker_id": tracker_id,
-                        "name": result[0],
-                        "score": float(result[1])
-                    })
+                        "name": name,
+                        "score": float(score)
+                    }
+                    db_queue.put((stream_id, db_event)) # Gửi (stream_id, event) cho db_worker
 
             recognition_queue.task_done()
         except Exception as e:
             logger.error(f"[RECOG-WORKER] Lỗi nghiêm trọng: {e}")
+            recognition_queue.task_done()
 
-# --- Pipeline 2: Database Worker (Ghi SQLite) ---
-db_queue = queue.Queue()
+threading.Thread(target=recognition_worker_thread, daemon=True).start()
 
-def db_worker():
-    """Luồng worker chuyên dụng chỉ để ghi DB (SỬ DỤNG MYSQL POOL)."""
-    logger.info("[DB-WORKER] MySQL worker started.")
-    while True:
-        conn = None
-        cursor = None
-        try:
-            item = db_queue.get()
-            if item is None:
-                break
-            
-            # Lấy 1 kết nối từ pool (cực nhanh)
-            conn = db_pool.get_connection()
-            cursor = conn.cursor()
-            
-            # Câu lệnh INSERT cho MySQL dùng %s
-            query = ("INSERT INTO recognition_events "
-                     "(stream_id, tracker_id, name, score) "
-                     "VALUES (%s, %s, %s, %s)")
-            data = (item['stream_id'], item['tracker_id'], item['name'], item['score'])
-            
-            cursor.execute(query, data)
-            conn.commit() # Quan trọng!
-            
-            db_queue.task_done()
-            
-        except mysql.connector.Error as err:
-            logger.error(f"[DB-WORKER] Lỗi ghi MySQL: {err}")
-            # Nếu lỗi (ví dụ: mất kết nối), chúng ta không task_done()
-            # và có thể xem xét việc put item trở lại queue
-        except Exception as e:
-            logger.error(f"[DB-WORKER] Lỗi worker không xác định: {e}")
-        finally:
-            # Đảm bảo trả kết nối về pool dù thành công hay thất bại
-            if cursor:
-                cursor.close()
-            if conn and conn.is_connected():
-                conn.close()
-
-# ===================================================================
-# 3. CLASS XỬ LÝ CHO TỪNG LUỒNG (STREAM PROCESSOR)
-# ===================================================================
-
-# Class buffer này giúp chỉ lấy frame MỚI NHẤT, bỏ qua frame cũ
-class LatestFrameBuffer:
-    def __init__(self):
-        self._frame = None
-        self._lock = threading.Lock()
-    def put(self, frame):
-        with self._lock: self._frame = frame
-    def get(self):
-        with self._lock: return None if self._frame is None else self._frame.copy()
-
-class StreamProcessor:
-    """Quản lý trạng thái cho MỘT luồng video (camera)."""
-    def __init__(self, stream_source, stream_id):
+# ====================== VIDEO PROCESSOR CLASS ======================
+# Sử dụng class từ template của bạn, nhưng sửa lại logic xử lý
+class VideoProcessor:
+    def __init__(self, stream_source, stream_id, shared_detector: YOLO):
         self.stream_source = stream_source
         self.stream_id = stream_id
+        self.detector = shared_detector # Dùng chung detector
         
-        self.tracker = ByteTrack(frame_rate=20, lost_track_buffer=30)
-        self.frame_buffer = LatestFrameBuffer()
+        self.fps = self._probe_fps()
+        logger.info(f'Stream {stream_id} probed FPS: {self.fps}')
+        self.tracker = ByteTrack(frame_rate=int(self.fps), lost_track_buffer=LOST_TRACK_BUFFER)
+        
+        # State
+        self.frame_idx = 0
+        self.frame_skip = 1 # Bắt đầu bằng việc xử lý mọi frame
+
+        # Buffer & Thread (Từ template)
+        self.frame_buffer = self.LatestFrameBuffer() if USE_LATEST_ONLY else deque(maxlen=10)
         self.stop_event = threading.Event()
         self.reader_thread = None
-        self.web_status = False # Chỉ đọc frame khi có client kết nối
-        self.total_count_this_session = 0 # Đếm tạm thời
+        self.web_status = False
+
+    class LatestFrameBuffer:
+        def __init__(self):
+            self._frame = None
+            self._lock = threading.Lock()
+        
+        def put(self, frame):
+            with self._lock:
+                self._frame = frame
+        
+        def get(self):
+            with self._lock:
+                return None if self._frame is None else self._frame.copy()
+
+    def _probe_fps(self):
+        try:
+            cap = cv2.VideoCapture(self.stream_source, cv2.CAP_FFMPEG)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            cap.release()
+            return fps if fps and not math.isnan(fps) and fps > 0 else 25.0
+        except Exception: return 25.0
 
     def _frame_reader_task(self):
-        """Luồng I/O chuyên dụng: Chỉ đọc frame và đưa vào buffer."""
-        logger.info(f"[READER-{self.stream_id}] Frame reader task started.")
         backoff = 2
         while not self.stop_event.is_set():
             if not self.web_status:
-                time.sleep(1) # Ngủ nếu không có ai xem
+                time.sleep(1)
                 continue
 
-            cap = cv2.VideoCapture(self.stream_source)
+            cap = cv2.VideoCapture(self.stream_source, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 5)
             if not cap.isOpened():
-                logger.warning(f"[READER-{self.stream_id}] Không thể mở stream. Thử lại sau {backoff}s...")
+                logger.error(f'Không thể mở RTSP stream {self.stream_id}. Thử lại sau {backoff}s...')
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 30)
                 continue
-
-            logger.info(f"[READER-{self.stream_id}] Stream opened successfully.")
+            
             backoff = 2
+            logger.info(f"RTSP stream {self.stream_id} đã mở.")
             while self.web_status and not self.stop_event.is_set():
                 ret, frame = cap.read()
                 if not ret:
-                    logger.warning(f"[READER-{self.stream_id}] Mất kết nối. Đang kết nối lại...")
+                    logger.error(f'Stream {self.stream_id} bị ngắt. Đang kết nối lại...')
                     break
-                
-                # Resize ngay tại luồng đọc để giảm tải
-                TARGET_WIDTH = 720
-                h, w, _ = frame.shape
-                scale = TARGET_WIDTH / w
-                new_h, new_w = int(h * scale), TARGET_WIDTH
-                frame_small = cv2.resize(frame, (new_w, new_h))
-                
-                self.frame_buffer.put(frame_small)
-                cv2.waitKey(1) # Rất quan trọng cho một số stream RTSP
+                if RESIZE_PERCENT != 100:
+                    h, w = frame.shape[:2]
+                    nh, nw = int(h * RESIZE_PERCENT / 100), int(w * RESIZE_PERCENT / 100)
+                    frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+                self.frame_buffer.put(frame)
+                cv2.waitKey(1)
             cap.release()
 
     def start_reader(self):
@@ -286,274 +273,357 @@ class StreamProcessor:
             self.stop_event.clear()
             self.reader_thread = threading.Thread(target=self._frame_reader_task, daemon=True)
             self.reader_thread.start()
+            logger.info(f"Frame reader thread cho stream {self.stream_id} đã bắt đầu.")
 
     def stop_reader(self):
         self.stop_event.set()
         if self.reader_thread and self.reader_thread.is_alive():
             self.reader_thread.join(timeout=2)
-        self.web_status = False
+        logger.info(f"Frame reader cho stream {self.stream_id} đã dừng.")
 
-# ===================================================================
-# 4. LOGIC XỬ LÝ CHÍNH (CHẠY TRONG AI THREAD POOL)
-# ===================================================================
+    def set_web_status(self, status: bool):
+        self.web_status = status
+        self.frame_idx = 0
+        logger.info(f"Trạng thái Web cho stream {self.stream_id} được đặt: {status}")
+        if not status:
+            self.stop_reader()
 
-def _get_detections_for_tracker(frame_rgb):
-    """Helper: Sao chép từ realtime_check.py, nhưng dùng model TOÀN CỤC."""
-    results = DETECTOR_MODEL(frame_rgb, device=DEVICE, verbose=False)
-    # ... (Toàn bộ logic xử lý results giữ nguyên y hệt file gốc của bạn) ...
-    boxes_xyxy = []
-    confs = []
-    landmarks = []
-    for res in results:
-        if res.boxes is None: continue
-        xyxy_cpu = res.boxes.xyxy.cpu().numpy()
-        confs_cpu = res.boxes.conf.cpu().numpy()
-        if res.keypoints is not None and len(res.keypoints.xy) > 0:
-            keypoints_xy = res.keypoints.xy.cpu().numpy()
-        else: 
-            keypoints_xy = np.zeros((len(xyxy_cpu), 5, 2))
-        boxes_xyxy.append(xyxy_cpu)
-        confs.append(confs_cpu)
-        landmarks.append(keypoints_xy)
-    if not boxes_xyxy: return None
-    all_boxes_xyxy = np.concatenate(boxes_xyxy)
-    all_confs = np.concatenate(confs)
-    all_landmarks = np.concatenate(landmarks)
-    detections = Detections(xyxy=all_boxes_xyxy, confidence=all_confs)
-    detections.data['landmarks'] = all_landmarks
-    return detections
-
-def _clean_global_cache(current_time):
-    """Dọn dẹp cache TOÀN CỤC."""
-    global last_cache_clean_time
-    if current_time - last_cache_clean_time <= 30.0:
-        return # Chỉ dọn 30s một lần
+    def process_and_draw_frame(self, frame: cv2.Mat):
+        """
+        Đây là hàm logic chính, KẾT HỢP Face Rec vào, trả về (annotated_frame, processing_time, visible_identities_list)
+        """
+        start_time = time.perf_counter()
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        current_time = time.time()
         
-    ids_to_remove = []
-    with cache_lock:
-        try:
-            for tracker_id, (_, _, timestamp) in recognition_cache.items():
-                if current_time - timestamp > CACHE_TTL_SECONDS:
-                    ids_to_remove.append(tracker_id)
-            for tracker_id in ids_to_remove:
-                if tracker_id in recognition_cache:
-                    del recognition_cache[tracker_id]
-        except RuntimeError:
-            pass # Bỏ qua nếu dict thay đổi
-    last_cache_clean_time = current_time
-    if ids_to_remove:
-        logger.info(f"[CACHE] Dọn dẹp {len(ids_to_remove)} ID quá hạn.")
-
-def process_and_draw_frame(processor: StreamProcessor, frame: np.ndarray):
-    """
-    Hàm này chạy trong AI Thread Pool (từ run_in_threadpool).
-    Nó thực hiện Detect + Track và gửi yêu cầu Recognition.
-    """
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    current_time = time.time()
-    
-    # 1. Dọn cache (chỉ chạy định kỳ)
-    _clean_global_cache(current_time)
-
-    # 2. Detect và Track (Nhanh)
-    detections = _get_detections_for_tracker(frame_rgb)
-    if detections is None:
-        return frame, processor.total_count_this_session
-
-    tracked_detections = processor.tracker.update_with_detections(detections)
-
-    faces_to_process_queue = [] # Batch cho recognition worker
-
-    # 3. Phân loại mặt
-    new_faces_found = False
-    for i in range(len(tracked_detections)):
-        xyxy = tracked_detections.xyxy[i]
-        tracker_id = tracked_detections.tracker_id[i]
-        landmark = tracked_detections.data['landmarks'][i]
-        
-        with cache_lock:
-            cached_result = recognition_cache.get(tracker_id)
-
-        if cached_result is None:
-            # Khuôn mặt HOÀN TOÀN MỚI
-            faces_to_process_queue.append((tracker_id, landmark, xyxy))
-            # Đánh dấu tạm thời để tránh gửi liên tục
+        # Dọn Cache (chỉ chạy định kỳ)
+        global last_cache_clean_time
+        if current_time - last_cache_clean_time > 30.0:
+            ids_to_remove = []
             with cache_lock:
-                recognition_cache[tracker_id] = ("Processing...", 0.0, current_time)
-            new_faces_found = True
+                try:
+                    for tracker_id, (_, _, timestamp) in recognition_cache.items():
+                        if current_time - timestamp > CACHE_TTL_SECONDS:
+                            ids_to_remove.append(tracker_id)
+                    for tracker_id in ids_to_remove:
+                        if tracker_id in recognition_cache: del recognition_cache[tracker_id]
+                except RuntimeError: pass
+            last_cache_clean_time = current_time
+            if ids_to_remove: logger.info(f"[CACHE] Dọn dẹp {len(ids_to_remove)} ID quá hạn.")
+
+        # 1. Detect (Dùng detector chung)
+        results = self.detector(frame_rgb, device=DEVICE, verbose=False, conf=cfg.DETECTION_CONFIDENCE)[0]
+        detections_sv = Detections.from_ultralytics(results)
+        
+        # Lấy Keypoints (cần cho Face Align)
+        landmarks = []
+        if results.keypoints is not None and len(results.keypoints.xy) > 0:
+            landmarks = results.keypoints.xy.cpu().numpy()
         else:
-            # Đã biết hoặc đang xử lý. Cập nhật timestamp để không bị xóa
-            name, score, _ = cached_result
-            if name == "Unknown": # Nếu trước đó là Unknown, thử nhận dạng lại
-                new_faces_found = True
-                faces_to_process_queue.append((tracker_id, landmark, xyxy))
-            
-            with cache_lock:
-                recognition_cache[tracker_id] = (name, score, current_time)
-            
-            # Đếm nếu là người đã xác định
-            if name not in ["Processing...", "Unknown", "Error"]:
-                processor.total_count_this_session += 1 # Đây chỉ là logic đếm ví dụ
-
-    # 4. GỬI YÊU CẦU NHẬN DẠNG (NON-BLOCKING)
-    if new_faces_found and faces_to_process_queue:
-        # Gửi toàn bộ batch + frame gốc sang Recognition Worker
-        recognition_queue.put((frame_rgb.copy(), faces_to_process_queue, processor.stream_id))
-
-    # 5. Vẽ lên frame (Luôn đọc từ cache)
-    annotated_frame = frame.copy()
-    for detection in tracked_detections:
-        xyxy = detection[0]
-        tracker_id = detection[4]
+            landmarks = np.zeros((len(detections_sv), 5, 2))
+        detections_sv.data['landmarks'] = landmarks
         
-        # Đọc cache MỘT LẦN KHI VẼ (có khóa)
-        with cache_lock:
-            name, score, _ = recognition_cache.get(tracker_id, ("Processing...", 0.0, 0))
+        # 2. Track (Dùng tracker riêng của stream)
+        tracked_detections = self.tracker.update_with_detections(detections_sv)
 
-        label = f"{name} ({score:.2f})"
-        x1, y1, x2, y2 = [int(coord) for coord in xyxy]
-        color_bgr = NAME2COLOR.get(name, (0, 0, 255)) 
+        faces_to_process_queue = []
+        new_faces_found = False
+        
+        # Tạo danh sách người hiển thị cho UI
+        visible_identities_list = []
 
-        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color_bgr, 2)
-        text_y = y1 - 10 if y1 - 10 > 10 else y2 + 20
-        cv2.putText(annotated_frame, label, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_bgr, 2)
+        # 3. Phân loại mặt & Gửi nhận dạng
+        for i in range(len(tracked_detections)):
+            xyxy = tracked_detections.xyxy[i]
+            tracker_id = tracked_detections.tracker_id[i]
+            landmark = tracked_detections.data['landmarks'][i]
 
-    return annotated_frame, processor.total_count_this_session
+            with cache_lock:
+                cached_result = recognition_cache.get(tracker_id)
 
+            if cached_result is None:
+                faces_to_process_queue.append((tracker_id, landmark, xyxy))
+                with cache_lock:
+                    recognition_cache[tracker_id] = ("Processing...", 0.0, current_time)
+                new_faces_found = True
+            else:
+                name, score, _ = cached_result
+                if name == "Unknown": # Thử lại nếu không rõ
+                    new_faces_found = True
+                    faces_to_process_queue.append((tracker_id, landmark, xyxy))
+                with cache_lock: # Cập nhật timestamp
+                    recognition_cache[tracker_id] = (name, score, current_time)
+                
+                # Thêm vào danh sách UI nếu đã nhận dạng
+                if name not in ["Processing...", "Unknown", "Error"]:
+                    x1, y1, x2, y2 = [int(c) for c in xyxy]
+                    color_bgr = NAME2COLOR.get(name, (0,0,255))
+                    
+                    # Cắt thumbnail
+                    crop = frame[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        thumb = cv2.resize(crop, THUMBNAIL_SIZE, interpolation=cv2.INTER_AREA)
+                        ok, buf = cv2.imencode('.jpg', thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 40]) # Chất lượng thấp cho thumbnail
+                        thumb_b64 = base64.b64encode(buf).decode('utf-8')
+                        
+                        # Chuyển BGR (OpenCV) sang RGB (CSS)
+                        color_css = f"rgb({color_bgr[2]}, {color_bgr[1]}, {color_bgr[0]})"
+                        
+                        visible_identities_list.append({
+                            "id": tracker_id,
+                            "name": name,
+                            "color": color_css,
+                            "thumb": thumb_b64
+                        })
 
-# =====================================
-# 5. FASTAPI APPLICATION VÀ WEBSOCKETS
-# =====================================
+        # 4. GỬI YÊU CẦU NHẬN DẠNG (NON-BLOCKING)
+        if new_faces_found and faces_to_process_queue:
+            recognition_queue.put((frame_rgb.copy(), faces_to_process_queue, self.stream_id))
+
+        # 5. Vẽ lên frame (Luôn đọc từ cache)
+        annotated_frame = frame.copy()
+        for detection in tracked_detections:
+            xyxy, _, _, _, tracker_id, _ = detection
+            with cache_lock:
+                name, score, _ = recognition_cache.get(tracker_id, ("Processing...", 0.0, 0))
+
+            label = f"{name} ({score:.2f})"
+            x1, y1, x2, y2 = [int(coord) for coord in xyxy]
+            color_bgr = NAME2COLOR.get(name, (0, 0, 255))
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color_bgr, 2)
+            text_y = y1 - 10 if y1 - 10 > 10 else y2 + 20
+            cv2.putText(annotated_frame, label, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_bgr, 2)
+
+        processing_time = time.perf_counter() - start_time
+        return annotated_frame, processing_time, visible_identities_list
+
+    def tune_frame_skip_by_time(self, processing_time: float):
+        frame_interval = 1.0 / self.fps
+        if processing_time > frame_interval * 1.5: # LOAD_THRESHOLD_HIGH
+            self.frame_skip = min(self.frame_skip + 1, 8) # FRAME_SKIP_MAX
+        elif processing_time < frame_interval * 0.5: # LOAD_THRESHOLD_LOW
+            self.frame_skip = max(self.frame_skip - 1, 1) # FRAME_SKIP_MIN
+
+# ====================== FASTAPI APP ======================
 app = FastAPI()
-# Tạo AI Thread Pool
-AI_EXECUTOR = ThreadPoolExecutor(max_workers=os.cpu_count() or 4) 
-
-# --- Cấu hình các luồng đầu vào ---
-STREAM_SOURCES = {
-    0: "rtsp://rtsp-server:8554/mystream1",
-    1: "rtsp://rtsp-server:8554/mystream2",
-}
-
-# Khởi tạo các processor cho mỗi nguồn
-PROCESSORS = {
-    stream_id: StreamProcessor(source, stream_id) 
-    for stream_id, source in STREAM_SOURCES.items()
-}
+max_workers = max(4, min(os.cpu_count() or 4, len(RTSP_URLS) * 2))
+Executor = ThreadPoolExecutor(max_workers=max_workers)
+    
+# Khởi tạo các VideoProcessor
+video_processors = [
+    VideoProcessor(source, i, DETECTOR_MODEL)
+    for i, source in enumerate(RTSP_URLS)
+]
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("Initializing database...")
-    initialize_database()
-    
-    """Khởi động tất cả các luồng worker nền."""
-    # 1. Khởi động DB Worker
-    threading.Thread(target=db_worker, daemon=True).start()
-    # 2. Khởi động Recognition Worker
-    threading.Thread(target=recognition_worker, daemon=True).start()
-    # 3. Khởi động tất cả các Frame Reader
-    for proc in PROCESSORS.values():
-        proc.start_reader()
-    logger.info("All background workers and stream readers started.")
+    for processor in video_processors:
+        processor.start_reader()
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Dọn dẹp tài nguyên khi tắt server."""
-    logger.info("Shutting down...")
-    for proc in PROCESSORS.values():
-        proc.stop_reader()
-    recognition_queue.put(None) # Gửi tín hiệu dừng
-    db_queue.put(None)          # Gửi tín hiệu dừng
-    AI_EXECUTOR.shutdown(wait=True)
-    logger.info("Shutdown complete.")
+    for processor in video_processors:
+        processor.stop_reader()
+    db_queue.put(None)
+    recognition_queue.put(None) 
+    Executor.shutdown(wait=True)
 
-# Phục vụ file HTML
-@app.get("/")
-async def get_index():
-    # Đọc file HTML từ ổ đĩa
-    html_path = os.path.join(current_dir, "index.html")
-    if not os.path.exists(html_path):
-        return HTMLResponse("<html><body><h1>Lỗi</h1><p>Không tìm thấy file index.html</p></body></html>", status_code=500)
-    with open(html_path, "r", encoding="utf-8") as f:
-        html_content = f.read()
-    
-    # Tự động tạo các khối video trong HTML dựa trên cấu hình STREAM_SOURCES
-    stream_blocks = ""
-    for stream_id in STREAM_SOURCES.keys():
-        stream_blocks += f"""
-        <div class="stream-wrapper">
-            <h3>Camera {stream_id}</h3>
-            <canvas id="video-canvas-{stream_id}" class="video-canvas"></canvas>
-            <div id="data-display-{stream_id}" class="data-display">Count: --</div>
+# Đăng ký StaticFiles
+current_dir = os.path.dirname(os.path.abspath(__file__))
+static_dir_path = os.path.join(current_dir, "static")
+app.mount("/static", StaticFiles(directory=static_dir_path), name="static")
+
+# HTML giao diện
+HTML = """
+<!doctype html>
+<html>
+<head>
+    <meta charset='utf-8'>
+    <title>Face Recognition Streams</title>
+    <style>
+        body { background: #111; color: #eee; font-family: sans-serif; margin: 0; padding: 0; }
+        h2 { text-align: center; color: #00FF00; margin-top: 15px; }
+        
+        /* Layout chính 2 cột */
+        .main-container {
+            display: flex;
+            flex-direction: row;
+            width: 100%%;
+            height: calc(100vh - 50px); /* Chiều cao tối đa trừ đi tiêu đề */
+        }
+        
+        /* CỘT BÊN TRÁI: Video Streams */
+        .video-panel {
+            flex: 3; /* Chiếm 3/4 không gian */
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-content: flex-start;
+            overflow-y: auto;
+            background: #0a0a0a;
+            padding: 10px;
+        }
+        .stream-wrapper {
+            text-align: center;
+            margin: 10px;
+            padding: 5px;
+            border: 1px solid #333;
+            border-radius: 5px;
+            background: #1a1a1a;
+        }
+        .stream-wrapper h3 { margin: 5px 0; }
+        canvas { display: block; width: auto; max-width: 100%%; height: auto; image-rendering: pixelated; border-radius: 4px; } 
+
+        /* CỘT BÊN PHẢI: Sidebar Nhận diện */
+        .sidebar-panel {
+            flex: 1; /* Chiếm 1/4 không gian */
+            display: flex;
+            flex-direction: column;
+            overflow-y: hidden;
+            background: #1E1E1E;
+            border-left: 2px solid #444;
+        }
+        .sidebar-wrapper {
+             overflow-y: auto; /* Cho phép cuộn nếu danh sách quá dài */
+             flex-grow: 1;
+        }
+        .sidebar-stream-group {
+            border-bottom: 1px dashed #555;
+            padding-bottom: 10px;
+            margin-bottom: 10px;
+        }
+        .sidebar-stream-group h3 { text-align: center; color: #ddd; }
+        .sidebar-content {
+            display: flex;
+            flex-wrap: wrap; /* Tự động xuống hàng các thumbnail */
+            justify-content: center;
+        }
+        .sidebar-empty { padding: 20px; text-align: center; color: #888; }
+        
+        /* Thẻ thumbnail */
+        .identity-card {
+            width: 100px;
+            margin: 5px;
+            text-align: center;
+            background: #2a2a2a;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .identity-thumb {
+            width: 100%%; /* Cố định chiều rộng */
+            height: 100px; /* Cố định chiều cao */
+            object-fit: cover; /* Đảm bảo ảnh lấp đầy, không bị méo */
+        }
+        .identity-name {
+            font-weight: bold;
+            font-size: 0.9em;
+            margin: 5px 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+    </style>
+</head>
+<body>
+    <h2>Multi-Stream Face Recognition Server</h2>
+    <div class='main-container'>
+        <div class='video-panel' data-stream-count='%d'>
+            %s
         </div>
-        """
-    return HTMLResponse(html_content.replace("", stream_blocks))
+        <div class='sidebar-panel'>
+            <div class="sidebar-wrapper"> %s
+            </div>
+        </div>
+    </div>
+    <script src='./static/main.js'></script>
+</body>
+</html>
+"""
 
-# Phục vụ file JavaScript
-@app.get("/static/main.js")
-async def get_js():
-    js_path = os.path.join(current_dir, "static", "main.js")
-    if not os.path.exists(js_path):
-        return HTMLResponse("alert('main.js not found!');", media_type="application/javascript", status_code=404)
-    with open(js_path, "r", encoding="utf-8") as f:
-        js_content = f.read()
-    
-    # Tự động chèn các ID stream vào JavaScript
-    stream_ids_js_array = json.dumps(list(STREAM_SOURCES.keys()))
-    js_content = js_content.replace("['STREAM_IDS_PLACEHOLDER']", stream_ids_js_array)
-    return HTMLResponse(js_content, media_type="application/javascript")
+# Tạo 2 khối HTML: Một cho Video, một cho Sidebar
+stream_html_videos = ""
+stream_html_sidebars = ""
 
+for i in range(len(RTSP_URLS)):
+    # Tạo khối video cho cột trái
+    stream_html_videos += f"""
+    <div class="stream-wrapper">
+        <h3>Camera {i}</h3>
+        <canvas id='video-stream-{i}' class='video'></canvas>
+    </div>
+    """
+    # Tạo khối chứa (rỗng) cho sidebar cột phải
+    stream_html_sidebars += f"""
+    <div class="sidebar-stream-group">
+        <h3>Camera {i} - Nhận diện</h3>
+        <div class="sidebar-content" id="identity-sidebar-{i}">
+             <p class="sidebar-empty">Đang chờ kết nối...</p>
+        </div>
+    </div>
+    """
 
-@app.websocket("/ws/{stream_id}")
-async def websocket_endpoint(websocket: WebSocket, stream_id: int):
-    """Điểm cuối WebSocket: Nhận frame từ Reader, đẩy vào AI Pool, stream kết quả."""
-    if stream_id not in PROCESSORS:
-        await websocket.close(code=1008, reason="Invalid Stream ID")
+# Điền 3 giá trị vào HTML chính
+HTML_RESPONSE = HTML % (len(RTSP_URLS), stream_html_videos, stream_html_sidebars)
+
+@app.get('/')
+async def index():
+    return HTMLResponse(HTML_RESPONSE)
+
+@app.websocket('/ws/{stream_id}')
+async def ws_endpoint(ws: WebSocket, stream_id: int):
+    if not (0 <= stream_id < len(video_processors)):
+        await ws.close(code=1008, reason="Invalid stream ID")
         return
 
-    await websocket.accept()
-    processor = PROCESSORS[stream_id]
-    processor.web_status = True # Báo cho Reader Thread bắt đầu đọc
-    logger.info(f"[WS-{stream_id}] Client connected. Reader activated.")
+    await ws.accept()
+    processor = video_processors[stream_id]
+    processor.set_web_status(True)
 
     try:
-        while websocket.client_state == WebSocketState.CONNECTED:
-            # 1. Lấy frame mới nhất từ Reader Thread Buffer (Non-blocking)
-            frame = processor.frame_buffer.get() 
-            
+        while ws.client_state == WebSocketState.CONNECTED:
+            frame = processor.frame_buffer.get()
             if frame is None:
-                await asyncio.sleep(0.01) # Chờ frame nếu buffer rỗng
+                await asyncio.sleep(0.01)
                 continue
 
-            # 2. Đẩy tác vụ AI (nặng) vào AI Thread Pool (Non-blocking)
-            processed_frame, count = await run_in_threadpool(
-                process_and_draw_frame, processor, frame
-            )
+            processor.frame_idx += 1
+            processed_frame = None
+            visible_identities = []
 
-            # 3. Mã hóa và Gửi kết quả về trình duyệt (Async)
-            ok, buf = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-            if not ok:
-                continue
+            if processor.frame_idx % processor.frame_skip == 0:
+                # Chạy logic Face Rec trong ThreadPool, hàm này giờ trả về 3 giá trị
+                processed_frame, processing_time, visible_identities = await run_in_threadpool(
+                    processor.process_and_draw_frame, frame
+                )
+                processor.tune_frame_skip_by_time(processing_time)
+            else:
+                # Nếu skip, chúng ta chỉ cần vẽ lại frame cũ với box cũ
+                # (Chúng ta có thể bỏ qua phần này và chỉ gửi khi xử lý để giảm tải)
+                pass 
 
-            base64_image = base64.b64encode(buf).decode('utf-8')
-            
-            # Gửi gói JSON chứa ảnh và dữ liệu
-            message = {
-                'image': base64_image,
-                'count': count, # Gửi dữ liệu đếm
-                'timestamp': datetime.now().isoformat()
-            }
-            await websocket.send_json(message)
-            
-            # Giải phóng event loop một chút
-            await asyncio.sleep(0.001) 
+            # Chỉ gửi frame nếu nó đã được xử lý
+            if processed_frame is not None:
+                ok, buf = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+                if ok:
+                    base64_image = base64.b64encode(buf).decode('utf-8')
+                    message = {
+                        'image': base64_image,
+                        'identities': visible_identities,  # Lấy danh sách các khuôn mặt nhận diện
+                        'stream_id': processor.stream_id
+                    }
+                    await ws.send_text(json.dumps(message))
+                else:
+                    logger.error(f"Không thể encode frame cho stream {processor.stream_id}")
+
+            await asyncio.sleep(0.001)
 
     except WebSocketDisconnect:
-        logger.info(f"[WS-{stream_id}] Client disconnected.")
+        logger.info(f"Client đã ngắt kết nối khỏi stream {stream_id}.")
     except Exception as e:
-        logger.error(f"[WS-{stream_id}] Error: {e}")
+        logger.error(f'Lỗi WebSocket trên stream {stream_id}: {e}', exc_info=True)
     finally:
-        processor.web_status = False # Báo Reader Thread dừng lại
-        logger.info(f"[WS-{stream_id}] Connection closed. Reader deactivated.")
+        processor.set_web_status(False)
+        logger.info(f"Kết nối WebSocket cho stream {processor.stream_id} đã đóng.")
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, workers=1)
+if __name__ == '__main__':
+    uvicorn.run(app, host='0.0.0.0', port=8000, workers=1)

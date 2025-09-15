@@ -57,10 +57,12 @@ def initialize_database(stream_ids: list):
                         CREATE TABLE IF NOT EXISTS {table_name} (
                             id INT AUTO_INCREMENT PRIMARY KEY,
                             timestamp DATETIME,
+                            stream_id VARCHAR(50),
                             tracker_id INT,
                             name VARCHAR(255),
                             score FLOAT,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE KEY unique_track_per_stream (stream_id, tracker_id)
                         )
                     """)
                     logger.info(f"Table '{table_name}' ensured to exist.")
@@ -120,8 +122,8 @@ def db_insert(recognition_event: dict, stream_id):
         
     except mysql.connector.Error as err:
         logger.error(f"Database insert error for table '{table_name}': {err}")
-        if cnx:
-            cnx.rollback()
+        if conn:
+            conn.rollback()
     finally:
         if conn and conn.is_connected():
             cur.close()

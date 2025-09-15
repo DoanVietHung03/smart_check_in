@@ -66,6 +66,7 @@ LOST_TRACK_BUFFER = 30
 USE_LATEST_ONLY = True
 JPEG_QUALITY = 80
 CACHE_TTL_SECONDS = 5.0 # Thời gian xóa cache
+SESSION_TIMEOUT_SECONDS = 300.0 # (5 phút) Xóa người khỏi sidebar nếu không thấy
 THUMBNAIL_SIZE = (96, 96) # Kích thước cho ảnh thumbnail
 
 # ===================== TẢI MODEL TOÀN CỤC =========================
@@ -216,6 +217,10 @@ class VideoProcessor:
         self.stop_event = threading.Event()
         self.reader_thread = None
         self.web_status = False
+        
+        # State mới để lưu giữ những người đã thấy (thread-safe)
+        self.recently_seen = {} # Key: tracker_id, Value: {data cho UI}
+        self.session_lock = threading.Lock()
 
     class LatestFrameBuffer:
         def __init__(self):
@@ -290,103 +295,97 @@ class VideoProcessor:
 
     def process_and_draw_frame(self, frame: cv2.Mat):
         """
-        Đây là hàm logic chính, KẾT HỢP Face Rec vào, trả về (annotated_frame, processing_time, visible_identities_list)
+        LOGIC CHÍNH ĐÃ NÂNG CẤP:
+        Tạo và duy trì một "Nhật ký phiên" (self.recently_seen) của những người được nhận diện,
+        chỉ xóa họ nếu họ vắng mặt quá SESSION_TIMEOUT_SECONDS.
         """
         start_time = time.perf_counter()
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         current_time = time.time()
         
-        # Dọn Cache (chỉ chạy định kỳ)
+        # 1. Dọn Cache (như cũ)
         global last_cache_clean_time
         if current_time - last_cache_clean_time > 30.0:
             ids_to_remove = []
             with cache_lock:
                 try:
                     for tracker_id, (_, _, timestamp) in recognition_cache.items():
-                        if current_time - timestamp > CACHE_TTL_SECONDS:
-                            ids_to_remove.append(tracker_id)
+                        if current_time - timestamp > CACHE_TTL_SECONDS: ids_to_remove.append(tracker_id)
                     for tracker_id in ids_to_remove:
                         if tracker_id in recognition_cache: del recognition_cache[tracker_id]
                 except RuntimeError: pass
             last_cache_clean_time = current_time
             if ids_to_remove: logger.info(f"[CACHE] Dọn dẹp {len(ids_to_remove)} ID quá hạn.")
 
-        # 1. Detect (Dùng detector chung)
+        # 2. Detect & Track (như cũ)
         results = self.detector(frame_rgb, device=DEVICE, verbose=False, conf=cfg.DETECTION_CONFIDENCE)[0]
         detections_sv = Detections.from_ultralytics(results)
-        
-        # Lấy Keypoints (cần cho Face Align)
-        landmarks = []
-        if results.keypoints is not None and len(results.keypoints.xy) > 0:
-            landmarks = results.keypoints.xy.cpu().numpy()
-        else:
-            landmarks = np.zeros((len(detections_sv), 5, 2))
+        landmarks = results.keypoints.xy.cpu().numpy() if results.keypoints is not None and len(results.keypoints.xy) > 0 else np.zeros((len(detections_sv), 5, 2))
         detections_sv.data['landmarks'] = landmarks
-        
-        # 2. Track (Dùng tracker riêng của stream)
         tracked_detections = self.tracker.update_with_detections(detections_sv)
 
         faces_to_process_queue = []
         new_faces_found = False
-        
-        # Tạo danh sách người hiển thị cho UI
-        visible_identities_list = []
 
-        # 3. Phân loại mặt & Gửi nhận dạng
+        # 3. Vòng lặp chính: Cập nhật cache, Gửi đi nhận dạng, VÀ CẬP NHẬT PHIÊN SIDEBAR
         for i in range(len(tracked_detections)):
             xyxy = tracked_detections.xyxy[i]
-            tracker_id = tracked_detections.tracker_id[i]
+            tracker_id = int(tracked_detections.tracker_id[i]) # Đảm bảo là Python int
             landmark = tracked_detections.data['landmarks'][i]
 
-            with cache_lock:
-                cached_result = recognition_cache.get(tracker_id)
+            with cache_lock: cached_result = recognition_cache.get(tracker_id)
 
             if cached_result is None:
                 faces_to_process_queue.append((tracker_id, landmark, xyxy))
-                with cache_lock:
-                    recognition_cache[tracker_id] = ("Processing...", 0.0, current_time)
+                with cache_lock: recognition_cache[tracker_id] = ("Processing...", 0.0, current_time)
                 new_faces_found = True
             else:
                 name, score, _ = cached_result
-                if name == "Unknown": # Thử lại nếu không rõ
+                if name == "Unknown":
                     new_faces_found = True
                     faces_to_process_queue.append((tracker_id, landmark, xyxy))
-                with cache_lock: # Cập nhật timestamp
-                    recognition_cache[tracker_id] = (name, score, current_time)
                 
-                # Thêm vào danh sách UI nếu đã nhận dạng
-                if name not in ["Processing...", "Unknown", "Error"]:
-                    x1, y1, x2, y2 = [int(c) for c in xyxy]
-                    color_bgr = NAME2COLOR.get(name, (0,0,255))
-                    
-                    # Cắt thumbnail
-                    crop = frame[y1:y2, x1:x2]
-                    if crop.size > 0:
-                        thumb = cv2.resize(crop, THUMBNAIL_SIZE, interpolation=cv2.INTER_AREA)
-                        ok, buf = cv2.imencode('.jpg', thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 40]) # Chất lượng thấp cho thumbnail
-                        thumb_b64 = base64.b64encode(buf).decode('utf-8')
-                        
-                        # Chuyển BGR (OpenCV) sang RGB (CSS)
-                        color_css = f"rgb({color_bgr[2]}, {color_bgr[1]}, {color_bgr[0]})"
-                        
-                        visible_identities_list.append({
-                            "id": tracker_id,
-                            "name": name,
-                            "color": color_css,
-                            "thumb": thumb_b64
-                        })
+                with cache_lock: # Cập nhật timestamp cho cache
+                    recognition_cache[tracker_id] = (name, score, current_time)
 
-        # 4. GỬI YÊU CẦU NHẬN DẠNG (NON-BLOCKING)
+                if name not in ["Processing...", "Unknown", "Error"]:
+                    with self.session_lock:
+                        if tracker_id not in self.recently_seen:
+                            # LẦN ĐẦU THẤY NGƯỜI NÀY: Chụp ảnh thumbnail và lưu lại
+                            logger.info(f"[Stream {self.stream_id}] Phát hiện người mới vào phiên: {name} (ID: {tracker_id})")
+                            x1, y1, x2, y2 = [int(c) for c in xyxy]
+                            color_bgr = NAME2COLOR.get(name, (0,0,255))
+                            
+                            crop = frame[y1:y2, x1:x2]
+                            thumb_b64 = None
+                            if crop.size > 0:
+                                thumb = cv2.resize(crop, THUMBNAIL_SIZE, interpolation=cv2.INTER_AREA)
+                                ok, buf = cv2.imencode('.jpg', thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
+                                thumb_b64 = base64.b64encode(buf).decode('utf-8')
+                            
+                            color_css = f"rgb({color_bgr[2]}, {color_bgr[1]}, {color_bgr[0]})"
+                            
+                            self.recently_seen[tracker_id] = {
+                                "id": tracker_id,
+                                "name": name,
+                                "color": color_css,
+                                "thumb": thumb_b64,
+                                "last_seen": current_time # Đặt timestamp
+                            }
+                        else:
+                            # ĐÃ THẤY NGƯỜI NÀY RỒI: Chỉ cần cập nhật timestamp để giữ họ "sống"
+                            self.recently_seen[tracker_id]['last_seen'] = current_time
+
         if new_faces_found and faces_to_process_queue:
             recognition_queue.put((frame_rgb.copy(), faces_to_process_queue, self.stream_id))
 
-        # 5. Vẽ lên frame (Luôn đọc từ cache)
+        # 4. Vẽ lên frame (Giữ nguyên)
         annotated_frame = frame.copy()
         for detection in tracked_detections:
-            xyxy, _, _, _, tracker_id, _ = detection
-            with cache_lock:
-                name, score, _ = recognition_cache.get(tracker_id, ("Processing...", 0.0, 0))
-
+            xyxy, _, _, _, tracker_id_raw, _ = detection
+            tracker_id = int(tracker_id_raw) # Ép kiểu int
+            
+            with cache_lock: name, score, _ = recognition_cache.get(tracker_id, ("Processing...", 0.0, 0))
             label = f"{name} ({score:.2f})"
             x1, y1, x2, y2 = [int(coord) for coord in xyxy]
             color_bgr = NAME2COLOR.get(name, (0, 0, 255))
@@ -394,8 +393,23 @@ class VideoProcessor:
             text_y = y1 - 10 if y1 - 10 > 10 else y2 + 20
             cv2.putText(annotated_frame, label, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_bgr, 2)
 
+        # 5. DỌN DẸP PHIÊN SIDEBAR (Xóa người cũ)
+        ids_to_remove_from_session = []
+        with self.session_lock:
+            for tid, data in self.recently_seen.items():
+                if current_time - data['last_seen'] > SESSION_TIMEOUT_SECONDS:
+                    ids_to_remove_from_session.append(tid)
+            
+            for tid in ids_to_remove_from_session:
+                del self.recently_seen[tid]
+                logger.info(f"[Stream {self.stream_id}] Xóa ID {tid} khỏi phiên (timeout).")
+
+        # 6. TẠO DỮ LIỆU GỬI ĐI
+        # Gửi toàn bộ danh sách "đã thấy gần đây" (đã được dọn dẹp)
+        identities_payload = list(self.recently_seen.values())
         processing_time = time.perf_counter() - start_time
-        return annotated_frame, processing_time, visible_identities_list
+        
+        return annotated_frame, processing_time, identities_payload
 
     def tune_frame_skip_by_time(self, processing_time: float):
         frame_interval = 1.0 / self.fps
@@ -527,7 +541,7 @@ HTML = """
 <body>
     <h2>Multi-Stream Face Recognition Server</h2>
     <div class='main-container'>
-        <div class='video-panel' data-stream-count='%d'>
+        <div class='video-panel video-container' data-stream-count='%d'>
             %s
         </div>
         <div class='sidebar-panel'>

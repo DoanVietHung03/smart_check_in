@@ -16,6 +16,11 @@ import sqlite3
 from datetime import datetime
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+import logging
+
+# Thiết lập logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # FastAPI & Uvicorn
 import uvicorn
@@ -28,17 +33,20 @@ from starlette.websockets import WebSocketState
 from supervision import ByteTrack, Detections
 from ultralytics import YOLO
 
+# Hàm khởi tạo DB
+from .db_manager import db_pool, initialize_database
+
 # --- Thêm đường dẫn và import các module ML ở folder Setting&Train ---
-from pythonFile.setting_and_train.config import cfg
-from pythonFile.setting_and_train.model import iresnet34
-from pythonFile.setting_and_train.utils import align_face, get_transforms, load_id2name
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)  
+setting_and_train_dir = os.path.join(project_root, "Setting_and_Train")
+sys.path.append(setting_and_train_dir)
 
 from config import cfg
 from model import iresnet34
 from utils import align_face, get_transforms, load_id2name
-from db_manager import db_pool, initialize_database # Hàm khởi tạo DB
 
-print("Imports completed. Loading models...")
+logger.info("Imports completed. Loading models...")
 
 # ==========================================================
 # 1. TẢI MODEL TOÀN CỤC (GLOBAL MODELS) VÀ CÁC THAM SỐ KHÁC 
@@ -48,19 +56,19 @@ DEVICE = torch.device(cfg.DEVICE)
 # 1.1. Detector
 DETECTOR_MODEL = YOLO(cfg.DETECTOR_MODEL_PATH).to(DEVICE)
 DETECTOR_MODEL.fuse()
-print("Global Face Detector (YOLO) loaded.")
+logger.info("Global Face Detector (YOLO) loaded.")
 
 # 1.2. Recognizer
 RECOGNIZER_MODEL = iresnet34(fp16=False).to(DEVICE)
 ckpt = torch.load(cfg.FINETUNED_MODEL_PATH, map_location=DEVICE, weights_only=True)
 RECOGNIZER_MODEL.load_state_dict(ckpt['model_state_dict'], strict=False)
 RECOGNIZER_MODEL.eval()
-print("Global Face Recognizer (iResNet) loaded.")
+logger.info("Global Face Recognizer (iResNet) loaded.")
 
 # 1.3. Gallery
 FAISS_INDEX = faiss.read_index(cfg.FAISS_INDEX_PATH)
 ID2NAME = load_id2name(cfg.ID2NAME_PATH)
-print("Global Gallery (Faiss + ID2Name) loaded.")
+logger.info("Global Gallery (Faiss + ID2Name) loaded.")
 
 # 1.4. Utils
 _, RECOG_TRANSFORM = get_transforms()
@@ -135,7 +143,7 @@ def _run_batch_recognition(frame_rgb_copy, faces_to_process):
                 })
 
     except Exception as e:
-        print(f"[RECOG-WORKER] Lỗi batch recognition: {e}")
+        logger.error(f"[RECOG-WORKER] Lỗi batch recognition: {e}")
         for tracker_id in batch_tracker_ids:
             with cache_lock:
                 if tracker_id not in recognition_cache:
@@ -143,7 +151,7 @@ def _run_batch_recognition(frame_rgb_copy, faces_to_process):
 
 def recognition_worker():
     """Luồng worker chuyên dụng chỉ để chạy iResNet (tránh xung đột GPU)."""
-    print("[RECOG-WORKER] Recognition worker started.")
+    logger.info("[RECOG-WORKER] Recognition worker started.")
     while True:
         try:
             item = recognition_queue.get()
@@ -167,14 +175,14 @@ def recognition_worker():
 
             recognition_queue.task_done()
         except Exception as e:
-            print(f"[RECOG-WORKER] Lỗi nghiêm trọng: {e}")
+            logger.error(f"[RECOG-WORKER] Lỗi nghiêm trọng: {e}")
 
 # --- Pipeline 2: Database Worker (Ghi SQLite) ---
 db_queue = queue.Queue()
 
 def db_worker():
     """Luồng worker chuyên dụng chỉ để ghi DB (SỬ DỤNG MYSQL POOL)."""
-    print("[DB-WORKER] MySQL worker started.")
+    logger.info("[DB-WORKER] MySQL worker started.")
     while True:
         conn = None
         cursor = None
@@ -199,11 +207,11 @@ def db_worker():
             db_queue.task_done()
             
         except mysql.connector.Error as err:
-            print(f"[DB-WORKER] Lỗi ghi MySQL: {err}")
+            logger.error(f"[DB-WORKER] Lỗi ghi MySQL: {err}")
             # Nếu lỗi (ví dụ: mất kết nối), chúng ta không task_done()
             # và có thể xem xét việc put item trở lại queue
         except Exception as e:
-            print(f"[DB-WORKER] Lỗi worker không xác định: {e}")
+            logger.error(f"[DB-WORKER] Lỗi worker không xác định: {e}")
         finally:
             # Đảm bảo trả kết nối về pool dù thành công hay thất bại
             if cursor:
@@ -240,7 +248,7 @@ class StreamProcessor:
 
     def _frame_reader_task(self):
         """Luồng I/O chuyên dụng: Chỉ đọc frame và đưa vào buffer."""
-        print(f"[READER-{self.stream_id}] Frame reader task started.")
+        logger.info(f"[READER-{self.stream_id}] Frame reader task started.")
         backoff = 2
         while not self.stop_event.is_set():
             if not self.web_status:
@@ -249,17 +257,17 @@ class StreamProcessor:
 
             cap = cv2.VideoCapture(self.stream_source)
             if not cap.isOpened():
-                print(f"[READER-{self.stream_id}] Không thể mở stream. Thử lại sau {backoff}s...")
+                logger.warning(f"[READER-{self.stream_id}] Không thể mở stream. Thử lại sau {backoff}s...")
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 30)
                 continue
-            
-            print(f"[READER-{self.stream_id}] Stream opened successfully.")
+
+            logger.info(f"[READER-{self.stream_id}] Stream opened successfully.")
             backoff = 2
             while self.web_status and not self.stop_event.is_set():
                 ret, frame = cap.read()
                 if not ret:
-                    print(f"[READER-{self.stream_id}] Mất kết nối. Đang kết nối lại...")
+                    logger.warning(f"[READER-{self.stream_id}] Mất kết nối. Đang kết nối lại...")
                     break
                 
                 # Resize ngay tại luồng đọc để giảm tải
@@ -334,7 +342,7 @@ def _clean_global_cache(current_time):
             pass # Bỏ qua nếu dict thay đổi
     last_cache_clean_time = current_time
     if ids_to_remove:
-        print(f"[CACHE] Dọn dẹp {len(ids_to_remove)} ID quá hạn.")
+        logger.info(f"[CACHE] Dọn dẹp {len(ids_to_remove)} ID quá hạn.")
 
 def process_and_draw_frame(processor: StreamProcessor, frame: np.ndarray):
     """
@@ -434,7 +442,7 @@ PROCESSORS = {
 
 @app.on_event("startup")
 async def startup_event():
-    print("Initializing database...")
+    logger.info("Initializing database...")
     initialize_database()
     
     """Khởi động tất cả các luồng worker nền."""
@@ -445,18 +453,18 @@ async def startup_event():
     # 3. Khởi động tất cả các Frame Reader
     for proc in PROCESSORS.values():
         proc.start_reader()
-    print("All background workers and stream readers started.")
+    logger.info("All background workers and stream readers started.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Dọn dẹp tài nguyên khi tắt server."""
-    print("Shutting down...")
+    logger.info("Shutting down...")
     for proc in PROCESSORS.values():
         proc.stop_reader()
     recognition_queue.put(None) # Gửi tín hiệu dừng
     db_queue.put(None)          # Gửi tín hiệu dừng
     AI_EXECUTOR.shutdown(wait=True)
-    print("Shutdown complete.")
+    logger.info("Shutdown complete.")
 
 # Phục vụ file HTML
 @app.get("/")
@@ -505,7 +513,7 @@ async def websocket_endpoint(websocket: WebSocket, stream_id: int):
     await websocket.accept()
     processor = PROCESSORS[stream_id]
     processor.web_status = True # Báo cho Reader Thread bắt đầu đọc
-    print(f"[WS-{stream_id}] Client connected. Reader activated.")
+    logger.info(f"[WS-{stream_id}] Client connected. Reader activated.")
 
     try:
         while websocket.client_state == WebSocketState.CONNECTED:
@@ -540,12 +548,12 @@ async def websocket_endpoint(websocket: WebSocket, stream_id: int):
             await asyncio.sleep(0.001) 
 
     except WebSocketDisconnect:
-        print(f"[WS-{stream_id}] Client disconnected.")
+        logger.info(f"[WS-{stream_id}] Client disconnected.")
     except Exception as e:
-        print(f"[WS-{stream_id}] Error: {e}")
+        logger.error(f"[WS-{stream_id}] Error: {e}")
     finally:
         processor.web_status = False # Báo Reader Thread dừng lại
-        print(f"[WS-{stream_id}] Connection closed. Reader deactivated.")
+        logger.info(f"[WS-{stream_id}] Connection closed. Reader deactivated.")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, workers=1)

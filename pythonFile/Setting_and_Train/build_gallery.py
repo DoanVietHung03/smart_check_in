@@ -19,10 +19,9 @@ def build_gallery():
     # 1. Load model nhận diện khuôn mặt
     model = iresnet50(fp16=False).to(cfg.DEVICE)
     try:
-        ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=cfg.DEVICE, weights_only=True)
-        # Tải với strict=False vì chúng ta chỉ tải backbone (thân mô hình), không phải head phân loại
+        ckpt = torch.load(cfg.BEST_FINETUNED_MODEL_PATH, map_location=cfg.DEVICE)
         model.load_state_dict(ckpt, strict=False) 
-        print(f"Successfully loaded PRE-TRAINED weights from: {cfg.PRETRAINED_RECOGNITION_MODEL_PATH}")
+        print(f"Successfully loaded PRE-TRAINED weights from: {cfg.BEST_FINETUNED_MODEL_PATH}")
     except Exception as e:
         print(f"FATAL: Could not load pre-trained weights. Error: {e}")
         return
@@ -38,7 +37,7 @@ def build_gallery():
     all_feats = []
     all_labels = []
     
-    train_dir = cfg.DATA_ROOT
+    train_dir = os.path.join(cfg.DATA_ROOT, "train")
     dataset = datasets.ImageFolder(train_dir)
     
     # Lấy class_names trực tiếp từ dataset (đáng tin cậy hơn là từ checkpoint)
@@ -83,10 +82,8 @@ def build_gallery():
     if not all_feats:
         print("FATAL: No features extracted. Cannot build gallery. Did you add photos to Dataset_Recognition/train/?")
         return
-
-    # 4. === THAY ĐỔI LOGIC TỪ ĐÂY ===
-    # KHÔNG TÍNH TRUNG BÌNH NỮA. Sử dụng TẤT CẢ các feats.
     
+    # Sử dụng TẤT CẢ các feats. 
     gallery_feats = np.vstack(all_feats) # Chuyển list các array (1, 512) thành 1 array (N, 512)
     gallery_labels = np.array(all_labels) # Chuyển list các label_idx thành 1 array (N,)
     
@@ -114,7 +111,6 @@ def build_gallery():
                 if label_index == lab_idx:
                     name2path[name] = path # Lưu đường dẫn file hệ thống
                     break
-    # === KẾT THÚC THAY ĐỔI LOGIC ===
 
     with open(cfg.ID2NAME_PATH, "w", encoding="utf-8") as f:
         json.dump(id2name, f, ensure_ascii=False, indent=4)

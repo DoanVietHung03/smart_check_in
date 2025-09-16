@@ -31,13 +31,11 @@ labels = np.load(labels_path)
 
 print(f"Loaded {len(embs)} embeddings with dim {embs.shape[1]}.")
 
-# ================ THAY ĐỔI Ở ĐÂY ================
 # 2. Lấy id2name từ ImageFolder (không cần file id2name.txt nữa)
-train_dir = cfg.DATA_ROOT
+train_dir = os.path.join(cfg.DATA_ROOT, "train")
 dataset = datasets.ImageFolder(train_dir)
 id2name = {i: name for i, name in enumerate(dataset.classes)}
 print("Mapping id2name:", id2name)
-# ===============================================
 
 # 3. Tự động chọn perplexity
 n_samples = len(embs)

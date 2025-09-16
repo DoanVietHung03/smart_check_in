@@ -17,7 +17,7 @@ import queue
 import uvicorn
 import base64
 import json
-from collections import deque
+from collections import deque, Counter # <-- ĐÃ THÊM COUNTER
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
@@ -79,10 +79,13 @@ logger.info("Global Face Detector (YOLO) loaded.")
 
 # 2. Recognizer
 RECOGNIZER_MODEL = iresnet50(fp16=False).to(DEVICE)
-ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=DEVICE, weights_only=True)
+# --- (SỬA LỖI 1) ---
+# Đã xóa `weights_only=True` vì file checkpoint là một dictionary
+ckpt = torch.load(cfg.BEST_FINETUNED_MODEL_PATH, map_location=DEVICE) 
 RECOGNIZER_MODEL.load_state_dict(ckpt, strict=False)
+# --------------------
 RECOGNIZER_MODEL.eval()
-logger.info("Global Face Recognizer (iResNet) loaded.")
+logger.info(f"Global Face Recognizer (iResNet) loaded from: {cfg.BEST_FINETUNED_MODEL_PATH}")
 
 # 3. Gallery
 FAISS_INDEX = faiss.read_index(cfg.FAISS_INDEX_PATH)
@@ -101,7 +104,7 @@ NAME2COLOR.update({"Unknown": (0, 0, 255), "Processing...": (192, 192, 192), "Er
 NAME_TO_WEB_PATH = {}
 try:
     # Lấy đường dẫn tuyệt đối đến thư mục gốc dataset
-    data_root_path = os.path.abspath(cfg.DATA_ROOT)
+    data_root_path = os.path.join(os.path.abspath(cfg.DATA_ROOT), "train")
     
     with open(cfg.NAME2PATH_PATH, 'r', encoding='utf-8') as f:
         name2path_fs = json.load(f) # Đường dẫn hệ thống tập tin
@@ -144,17 +147,27 @@ def db_worker():
         finally:
             db_queue.task_done()
 
-threading.Thread(target=db_worker, daemon=True).start()
+# --- (SỬA LỖI 3) --- Đã xóa dòng Thread.start() trùng lặp
 
-# --- Pipeline 2: Recognition Worker (Từ logic cũ của chúng ta) ---
+# --- Pipeline 2: Recognition Worker (LOGIC VOTING NÂNG CẤP) ---
 recognition_queue = queue.Queue()
 recognition_cache = {} # Cache nhận dạng (ID -> Tên)
 cache_lock = threading.Lock()
 last_cache_clean_time = time.time()
 
+# --- (SỬA LỖI 2) --- THAY THẾ TOÀN BỘ HÀM BẰNG LOGIC VOTING
 def recognition_worker_thread():
     """Luồng chuyên dụng chỉ để chạy iResNet, tránh xung đột GPU."""
-    logger.info("[RECOG-WORKER] Recognition worker started.")
+    logger.info("[RECOG-WORKER] Recognition worker started (VOTING LOGIC).")
+    
+    # === CÁC HẰNG SỐ ĐIỀU CHỈNH CHO LOGIC VOTING ===
+    # 1. Số lượng "hàng xóm" (ảnh gallery) gần nhất để lấy về
+    VOTING_K = 7 
+    # 2. Ngưỡng điểm TỐI THIỂU để một ảnh gallery được "bỏ phiếu".
+    VOTING_THRESHOLD = 0.45 
+    # 3. Số phiếu bầu TỐI THIỂU để được công nhận danh tính.
+    VOTE_MIN_COUNT = 3
+    
     while True:
         try:
             item = recognition_queue.get()
@@ -185,36 +198,77 @@ def recognition_worker_thread():
                 feats_batch = RECOGNIZER_MODEL(batch_tensors).cpu().numpy()
             
             faiss.normalize_L2(feats_batch)
-            scores_batch, indices_batch = FAISS_INDEX.search(feats_batch, 1)
+            
+            # === LOGIC VOTING MỚI ===
+            # Tìm k hàng xóm gần nhất
+            scores_batch, indices_batch = FAISS_INDEX.search(feats_batch, VOTING_K)
 
             for i, tracker_id in enumerate(batch_tracker_ids):
-                score = scores_batch[i][0]
-                idx = indices_batch[i][0]
-                name = "Unknown"
-                if score > cfg.RECOGNITION_THRESHOLD:
-                    name = ID2NAME.get(idx, "Unknown")
+                top_k_indices = indices_batch[i] # Array (VOTING_K,) các index FAISS
+                top_k_scores = scores_batch[i]  # Array (VOTING_K,) các điểm số
+                
+                votes = Counter()
+                
+                # Bỏ phiếu
+                for idx, score in zip(top_k_indices, top_k_scores):
+                    if score < VOTING_THRESHOLD:
+                        break # Mảng đã được sắp xếp, nên có thể dừng sớm
+                    
+                    # Lấy tên từ FAISS index (ID2NAME bây giờ là index -> name)
+                    # Phải dùng str(idx) vì ID2NAME tải từ JSON (key là string)
+                    name = ID2NAME.get(str(idx), "Unknown")
+                    
+                    if name != "Unknown":
+                        votes[name] += 1
+                
+                final_name = "Unknown"
+                final_score = 0.0
+
+                if votes:
+                    # Lấy người có nhiều phiếu bầu nhất
+                    most_common_vote = votes.most_common(1)[0]
+                    name = most_common_vote[0]
+                    vote_count = most_common_vote[1]
+                    
+                    # Kiểm tra xem có đủ số phiếu tối thiểu không
+                    if vote_count >= VOTE_MIN_COUNT:
+                        # Tính điểm trung bình của các phiếu bầu HỢP LỆ (chỉ của người chiến thắng)
+                        valid_scores = [s for s, idx in zip(top_k_scores, top_k_indices) 
+                                        if ID2NAME.get(str(idx)) == name and s >= VOTING_THRESHOLD]
+                        
+                        final_score = np.mean(valid_scores)
+                        
+                        # Sử dụng ngưỡng RECOGNITION_THRESHOLD từ config.py
+                        # để lọc kết quả CUỐI CÙNG (điểm trung bình)
+                        if final_score >= cfg.RECOGNITION_THRESHOLD:
+                            final_name = name
+                        else:
+                            final_name = "Unknown" # Điểm trung bình không đủ cao
+                    else:
+                        final_name = "Unknown" # Không đủ số phiếu
                 
                 # Cập nhật Cache toàn cục
                 with cache_lock:
-                    recognition_cache[tracker_id] = (name, score, current_time)
+                    recognition_cache[tracker_id] = (final_name, final_score, current_time)
                 
                 # Nếu nhận dạng thành công -> Gửi tới DB Worker
-                if name != "Unknown":
+                if final_name != "Unknown":
                     db_event = {
                         "timestamp": datetime.now(), # Lấy thời gian hiện tại
                         "stream_id": stream_id,
                         "tracker_id": tracker_id,
-                        "name": name,
-                        "score": float(score)
+                        "name": final_name,
+                        "score": float(final_score) # Lưu điểm trung bình
                     }
                     db_queue.put((stream_id, db_event)) # Gửi (stream_id, event) cho db_worker
+            # === KẾT THÚC LOGIC VOTING ===
 
             recognition_queue.task_done()
         except Exception as e:
             logger.error(f"[RECOG-WORKER] Lỗi nghiêm trọng: {e}")
             recognition_queue.task_done()
 
-threading.Thread(target=recognition_worker_thread, daemon=True).start()
+# --- (SỬA LỖI 3) --- Đã xóa dòng Thread.start() trùng lặp
 
 # ====================== VIDEO PROCESSOR CLASS ======================
 class VideoProcessor:
@@ -442,8 +496,10 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Database schema initialized successfully.")
 
+    # Chỉ khởi động worker 1 lần duy nhất ở đây
     threading.Thread(target=db_worker, daemon=True).start()
     threading.Thread(target=recognition_worker_thread, daemon=True).start()
+    
     for proc in PROCESSORS.values():
         proc.start_reader()
     logger.info("All background workers and stream readers started.")

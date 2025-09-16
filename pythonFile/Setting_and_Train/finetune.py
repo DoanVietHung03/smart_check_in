@@ -23,7 +23,7 @@ def finetune():
 
     # 2. Load pre-trained weights
     try:
-        model.load_state_dict(torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=cfg.DEVICE, weights_only=True), strict=False)
+        model.load_state_dict(torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=cfg.DEVICE), strict=False)
         print(f"Successfully loaded pre-trained weights from {cfg.PRETRAINED_RECOGNITION_MODEL_PATH}")
     except FileNotFoundError:
         print(f"WARNING: Pre-trained model not found at {cfg.PRETRAINED_RECOGNITION_MODEL_PATH}. Training from scratch.")
@@ -95,14 +95,14 @@ def finetune():
             # --- MODEL CHECKPOINTING & EARLY STOPPING LOGIC ---
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                print(f"✅ New best model found! Saving to {cfg.FINETUNED_MODEL_PATH}")
+                print(f"✅ New best model found! Saving to {cfg.BEST_FINETUNED_MODEL_PATH}")
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'arcface_head_state_dict': arcface_head.state_dict(),
                     'class_names': class_names,
                     'val_loss': best_val_loss
-                }, cfg.FINETUNED_MODEL_PATH)
+                }, cfg.BEST_FINETUNED_MODEL_PATH)
                 
                 # Reset bộ đếm kiên nhẫn khi tìm thấy model tốt hơn
                 patience_counter = 0

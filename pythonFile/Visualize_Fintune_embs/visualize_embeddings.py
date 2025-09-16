@@ -3,10 +3,10 @@ os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 import sys 
 
 # --- Thêm đường dẫn đến thư mục Setting&Train ---
-current_dir = os.path.dirname(os.path.abspath(__file__)) # Đường dẫn: .../Visualize_Fintune_embs
-root_dir = os.path.dirname(current_dir)                  # Đường dẫn: .../pythonFile (thư mục gốc)
-setting_train_path = os.path.join(root_dir, "Setting&Train")
-sys.path.append(setting_train_path)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)  
+setting_and_train_dir = os.path.join(project_root, "Setting_and_Train")
+sys.path.append(setting_and_train_dir)
 # --------------------------------------------------
 
 import numpy as np
@@ -33,7 +33,7 @@ print(f"Loaded {len(embs)} embeddings with dim {embs.shape[1]}.")
 
 # ================ THAY ĐỔI Ở ĐÂY ================
 # 2. Lấy id2name từ ImageFolder (không cần file id2name.txt nữa)
-train_dir = os.path.join(cfg.DATA_ROOT, "train")
+train_dir = cfg.DATA_ROOT
 dataset = datasets.ImageFolder(train_dir)
 id2name = {i: name for i, name in enumerate(dataset.classes)}
 print("Mapping id2name:", id2name)

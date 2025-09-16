@@ -5,14 +5,13 @@ import os
 class Config:
     # --- Paths ---
     BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # Lấy thư mục gốc của dự án
-    DATA_ROOT = os.path.join(BASE_DIR, "..", "..", "Dataset_Recognition")
+    DATA_ROOT = os.path.join(BASE_DIR, "..", "..", "Gallery")
     WEIGHTS_DIR = os.path.join(BASE_DIR, "..", "..", "pretrained_model_weights")
     OUTPUT_DIR = os.path.join(BASE_DIR, "..", "..", "checkpoints")
     
     # Các đường dẫn khác sẽ tự động đúng
     DETECTOR_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_detection_yolo", "yolov11n-face.pt")
     PRETRAINED_RECOGNITION_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_recognition_iResNet", "arcFace_r34.pth")
-    FINETUNED_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_finetuned_model.pth") # Đổi tên để khớp với file finetune mới
 
     FAISS_INDEX_PATH = os.path.join(OUTPUT_DIR, "faiss_gallery.idx")
     ID2NAME_PATH = os.path.join(OUTPUT_DIR, "id2name.txt")

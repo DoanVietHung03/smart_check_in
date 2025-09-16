@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
+from contextlib import asynccontextmanager
 
 # Các thư viện xử lý ảnh và AI
 from ultralytics import YOLO
@@ -61,13 +62,12 @@ RTSP_URLS = [
 ]
 
 # IO / Model
-RESIZE_PERCENT = 100
+RESIZE_PERCENT = 70
 LOST_TRACK_BUFFER = 30
 USE_LATEST_ONLY = True
 JPEG_QUALITY = 100
 CACHE_TTL_SECONDS = 5.0 # Thời gian xóa cache
 SESSION_TIMEOUT_SECONDS = 300.0 # (5 phút) Xóa người khỏi sidebar nếu không thấy
-THUMBNAIL_SIZE = (96, 96) # Kích thước cho ảnh thumbnail
 
 # ===================== TẢI MODEL TOÀN CỤC =========================
 DEVICE = torch.device(cfg.DEVICE)
@@ -79,8 +79,8 @@ logger.info("Global Face Detector (YOLO) loaded.")
 
 # 2. Recognizer
 RECOGNIZER_MODEL = iresnet34(fp16=False).to(DEVICE)
-ckpt = torch.load(cfg.FINETUNED_MODEL_PATH, map_location=DEVICE, weights_only=True)
-RECOGNIZER_MODEL.load_state_dict(ckpt['model_state_dict'], strict=False)
+ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=DEVICE, weights_only=True)
+RECOGNIZER_MODEL.load_state_dict(ckpt, strict=False)
 RECOGNIZER_MODEL.eval()
 logger.info("Global Face Recognizer (iResNet) loaded.")
 
@@ -97,6 +97,26 @@ for name in set(ID2NAME.values()):
     color_rgb = tuple(int(c) for c in rng.integers(0, 255, size=3))
     NAME2COLOR[name] = (color_rgb[2], color_rgb[1], color_rgb[0]) # BGR
 NAME2COLOR.update({"Unknown": (0, 0, 255), "Processing...": (192, 192, 192), "Error": (0, 255, 255)})
+
+NAME_TO_WEB_PATH = {}
+try:
+    # Lấy đường dẫn tuyệt đối đến thư mục gốc dataset
+    data_root_path = os.path.abspath(cfg.DATA_ROOT)
+    
+    with open(cfg.NAME2PATH_PATH, 'r', encoding='utf-8') as f:
+        name2path_fs = json.load(f) # Đường dẫn hệ thống tập tin
+    
+    for name, fs_path in name2path_fs.items():
+        # Lấy đường dẫn tương đối (ví dụ: train/John/01.jpg)
+        rel_path = os.path.relpath(os.path.abspath(fs_path), data_root_path)
+        # Chuyển đổi sang định dạng URL và thêm tiền tố mount
+        web_path = f"/gallery_images/{rel_path.replace(os.path.sep, '/')}"
+        NAME_TO_WEB_PATH[name] = web_path
+    
+    logger.info(f"Đã tải {len(NAME_TO_WEB_PATH)} đường dẫn ảnh gallery và chuyển đổi sang URL web.")
+
+except Exception as e:
+    logger.error(f"Không thể tải hoặc xử lý name2path.json: {e}. Sidebar thumbnail sẽ không hoạt động.")
 
 # ===================== KHỞI TẠO DB =========================
 stream_ids = [i for i, _ in enumerate(RTSP_URLS)]
@@ -128,7 +148,7 @@ threading.Thread(target=db_worker, daemon=True).start()
 
 # --- Pipeline 2: Recognition Worker (Từ logic cũ của chúng ta) ---
 recognition_queue = queue.Queue()
-recognition_cache = {} # Cache toàn cục
+recognition_cache = {} # Cache nhận dạng (ID -> Tên)
 cache_lock = threading.Lock()
 last_cache_clean_time = time.time()
 
@@ -197,7 +217,6 @@ def recognition_worker_thread():
 threading.Thread(target=recognition_worker_thread, daemon=True).start()
 
 # ====================== VIDEO PROCESSOR CLASS ======================
-# Sử dụng class từ template của bạn, nhưng sửa lại logic xử lý
 class VideoProcessor:
     def __init__(self, stream_source, stream_id, shared_detector: YOLO):
         self.stream_source = stream_source
@@ -265,7 +284,6 @@ class VideoProcessor:
                 if not ret:
                     logger.error(f'Stream {self.stream_id} bị ngắt. Đang kết nối lại...')
                     break
-                frame = cv2.rotate(frame, cv2.ROTATE_180)
                 if RESIZE_PERCENT != 100:
                     h, w = frame.shape[:2]
                     nh, nw = int(h * RESIZE_PERCENT / 100), int(w * RESIZE_PERCENT / 100)
@@ -303,7 +321,7 @@ class VideoProcessor:
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         current_time = time.time()
         
-        # 1. Dọn Cache (như cũ)
+        # 1. Dọn Cache quá hạn
         global last_cache_clean_time
         if current_time - last_cache_clean_time > 30.0:
             ids_to_remove = []
@@ -317,7 +335,7 @@ class VideoProcessor:
             last_cache_clean_time = current_time
             if ids_to_remove: logger.info(f"[CACHE] Dọn dẹp {len(ids_to_remove)} ID quá hạn.")
 
-        # 2. Detect & Track (như cũ)
+        # 2. Detect & Track
         results = self.detector(frame_rgb, device=DEVICE, verbose=False, conf=cfg.DETECTION_CONFIDENCE)[0]
         detections_sv = Detections.from_ultralytics(results)
         landmarks = results.keypoints.xy.cpu().numpy() if results.keypoints is not None and len(results.keypoints.xy) > 0 else np.zeros((len(detections_sv), 5, 2))
@@ -351,35 +369,30 @@ class VideoProcessor:
                 if name not in ["Processing...", "Unknown", "Error"]:
                     with self.session_lock:
                         if tracker_id not in self.recently_seen:
-                            # LẦN ĐẦU THẤY NGƯỜI NÀY: Chụp ảnh thumbnail và lưu lại
+                            # LẦN ĐẦU THẤY: Chỉ cần tra cứu đường dẫn và màu sắc (không crop/encode)
                             logger.info(f"[Stream {self.stream_id}] Phát hiện người mới vào phiên: {name} (ID: {tracker_id})")
-                            x1, y1, x2, y2 = [int(c) for c in xyxy]
+                            
                             color_bgr = NAME2COLOR.get(name, (0,0,255))
-                            
-                            crop = frame[y1:y2, x1:x2]
-                            thumb_b64 = None
-                            if crop.size > 0:
-                                thumb = cv2.resize(crop, THUMBNAIL_SIZE, interpolation=cv2.INTER_AREA)
-                                ok, buf = cv2.imencode('.jpg', thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
-                                thumb_b64 = base64.b64encode(buf).decode('utf-8')
-                            
                             color_css = f"rgb({color_bgr[2]}, {color_bgr[1]}, {color_bgr[0]})"
+                            
+                            # Tra cứu đường dẫn ảnh đại diện từ gallery
+                            thumb_web_path = NAME_TO_WEB_PATH.get(name, None) # Lấy URL web đã chuyển đổi
                             
                             self.recently_seen[tracker_id] = {
                                 "id": tracker_id,
                                 "name": name,
                                 "color": color_css,
-                                "thumb": thumb_b64,
-                                "last_seen": current_time # Đặt timestamp
+                                "thumb": thumb_web_path, # Gửi URL (hoặc None)
+                                "last_seen": current_time
                             }
                         else:
-                            # ĐÃ THẤY NGƯỜI NÀY RỒI: Chỉ cần cập nhật timestamp để giữ họ "sống"
+                            # ĐÃ THẤY: Chỉ cập nhật timestamp
                             self.recently_seen[tracker_id]['last_seen'] = current_time
 
         if new_faces_found and faces_to_process_queue:
             recognition_queue.put((frame_rgb.copy(), faces_to_process_queue, self.stream_id))
 
-        # 4. Vẽ lên frame (Giữ nguyên)
+        # 4. Vẽ lên frame
         annotated_frame = frame.copy()
         for detection in tracked_detections:
             xyxy, _, _, _, tracker_id_raw, _ = detection
@@ -419,33 +432,51 @@ class VideoProcessor:
             self.frame_skip = max(self.frame_skip - 1, 1) # FRAME_SKIP_MIN
 
 # ====================== FASTAPI APP ======================
-app = FastAPI()
-max_workers = max(4, min(os.cpu_count() or 4, len(RTSP_URLS) * 2))
-Executor = ThreadPoolExecutor(max_workers=max_workers)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- STARTUP LOGIC ---
+    logger.info("Initializing database...")
+    if not initialize_database(stream_ids):
+         logger.critical("FATAL: Database initialization failed.")
+         # Trong production, bạn có thể muốn raise Exception ở đây
+    else:
+        logger.info("Database schema initialized successfully.")
+
+    threading.Thread(target=db_worker, daemon=True).start()
+    threading.Thread(target=recognition_worker_thread, daemon=True).start()
+    for proc in PROCESSORS.values():
+        proc.start_reader()
+    logger.info("All background workers and stream readers started.")
     
-# Khởi tạo các VideoProcessor
-video_processors = [
-    VideoProcessor(source, i, DETECTOR_MODEL)
+    yield # Ứng dụng chạy ở đây
+
+    # --- SHUTDOWN LOGIC ---
+    logger.info("Shutting down...")
+    for proc in PROCESSORS.values():
+        proc.stop_reader()
+    recognition_queue.put(None); db_queue.put(None)
+    AI_EXECUTOR.shutdown(wait=True)
+    logger.info("Shutdown complete.")
+
+app = FastAPI(lifespan=lifespan)
+AI_EXECUTOR = ThreadPoolExecutor(max_workers=max(4, min(os.cpu_count() or 4, len(RTSP_URLS) * 2))) # Giới hạn số luồng AI
+
+PROCESSORS = {
+    i: VideoProcessor(source, i, DETECTOR_MODEL)
     for i, source in enumerate(RTSP_URLS)
-]
-
-@app.on_event("startup")
-async def startup_event():
-    for processor in video_processors:
-        processor.start_reader()
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    for processor in video_processors:
-        processor.stop_reader()
-    db_queue.put(None)
-    recognition_queue.put(None) 
-    Executor.shutdown(wait=True)
+}
 
 # Đăng ký StaticFiles
 current_dir = os.path.dirname(os.path.abspath(__file__))
 static_dir_path = os.path.join(current_dir, "static")
 app.mount("/static", StaticFiles(directory=static_dir_path), name="static")
+
+try:
+    gallery_fs_path = os.path.dirname(cfg.DATA_ROOT)
+    app.mount("/Gallery", StaticFiles(directory=gallery_fs_path), name="Gallery")
+    logger.info(f"Serving static gallery images from: {gallery_fs_path}")
+except Exception as e:
+    logger.error(f"Failed to mount gallery directory: {e}. Thumbnails will NOT load.")
 
 # HTML giao diện
 HTML = """
@@ -585,12 +616,12 @@ async def index():
 
 @app.websocket('/ws/{stream_id}')
 async def ws_endpoint(ws: WebSocket, stream_id: int):
-    if not (0 <= stream_id < len(video_processors)):
+    if not (0 <= stream_id < len(PROCESSORS)):
         await ws.close(code=1008, reason="Invalid stream ID")
         return
 
     await ws.accept()
-    processor = video_processors[stream_id]
+    processor = PROCESSORS[stream_id]
     processor.set_web_status(True)
 
     try:

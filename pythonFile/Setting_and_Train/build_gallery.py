@@ -7,6 +7,7 @@ from tqdm import tqdm
 from PIL import Image
 from torchvision import datasets
 import json
+import sys
 
 from config import cfg
 from model import iresnet34
@@ -15,13 +16,19 @@ from utils import FaceDetector, align_face, get_transforms
 def build_gallery():
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     
-    # 1. Load model đã fine-tuning
+    # 1. Load model nhận diện khuôn mặt
     model = iresnet34(fp16=False).to(cfg.DEVICE)
-    ckpt = torch.load(cfg.FINETUNED_MODEL_PATH, map_location=cfg.DEVICE, weights_only=True)
-    model.load_state_dict(ckpt['model_state_dict'])
+    try:
+        ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=cfg.DEVICE, weights_only=True)
+        # Tải với strict=False vì chúng ta chỉ tải backbone (thân mô hình), không phải head phân loại
+        model.load_state_dict(ckpt, strict=False) 
+        print(f"Successfully loaded PRE-TRAINED weights from: {cfg.PRETRAINED_RECOGNITION_MODEL_PATH}")
+    except Exception as e:
+        print(f"FATAL: Could not load pre-trained weights. Error: {e}")
+        return
+
     model.eval()
-    class_names = ckpt['class_names']
-    print("Fine-tuned model loaded.")
+    # -----------------------------------------------
 
     # 2. Khởi tạo detector và transform
     detector = FaceDetector()
@@ -31,27 +38,33 @@ def build_gallery():
     all_feats = []
     all_labels = []
     
-    train_dir = os.path.join(cfg.DATA_ROOT, "train")
+    train_dir = cfg.DATA_ROOT
     dataset = datasets.ImageFolder(train_dir)
     
-    ALIGNED_DEBUG_DIR = os.path.join("..", "aligned_debug")
+    # Lấy class_names trực tiếp từ dataset (đáng tin cậy hơn là từ checkpoint)
+    class_names = dataset.classes
+    if not class_names:
+        print(f"FATAL: Không tìm thấy thư mục danh tính nào trong: {train_dir}")
+        return
+    print(f"Found {len(class_names)} identities. Building gallery...")
+
+    ALIGNED_DEBUG_DIR = os.path.join(cfg.BASE_DIR, "..", "..", "aligned_debug") # Sửa đường dẫn cho đúng
     os.makedirs(ALIGNED_DEBUG_DIR, exist_ok=True)
     print(f"Saving aligned faces for debugging in: {ALIGNED_DEBUG_DIR}")
     
-    print("Building gallery... This may take a while.")
     for path, label_idx in tqdm(dataset.imgs):
         try:
             image_np = np.array(Image.open(path).convert("RGB"))
             boxes, landmarks = detector.detect(image_np)
 
-            if len(boxes) == 1:
+            if len(boxes) >= 1:
+                # Chỉ lấy khuôn mặt lớn nhất (đầu tiên) nếu có nhiều
                 aligned_face = align_face(image_np, landmarks[0], boxes[0])
                 
-                # >> THÊM VÀO: Lưu ảnh đã căn chỉnh
+                # Lưu ảnh đã căn chỉnh
                 person_name = class_names[label_idx]
                 person_debug_dir = os.path.join(ALIGNED_DEBUG_DIR, person_name)
                 os.makedirs(person_debug_dir, exist_ok=True)
-                
                 img_to_save = Image.fromarray(aligned_face)
                 img_to_save.save(os.path.join(person_debug_dir, os.path.basename(path)))
                 
@@ -62,8 +75,14 @@ def build_gallery():
                 
                 all_feats.append(feat)
                 all_labels.append(label_idx)
+            else:
+                 print(f"Warning: No face detected in {path}. Skipping.")
         except Exception as e:
             print(f"Skipping {path} due to error: {e}")
+
+    if not all_feats:
+        print("FATAL: No features extracted. Cannot build gallery. Did you add photos to Dataset_Recognition/train/?")
+        return
 
     # 4. Tính embedding trung bình
     gallery_feats = []
@@ -72,44 +91,45 @@ def build_gallery():
     all_labels = np.array(all_labels)
 
     for lab_idx in sorted(set(all_labels)):
+        # Tính trung bình tất cả các vector của cùng một người để tạo 1 vector "nguyên mẫu"
         gallery_feats.append(all_feats[all_labels == lab_idx].mean(axis=0))
         gallery_labels.append(lab_idx)
 
     gallery_feats = np.array(gallery_feats, dtype='float32')
-    faiss.normalize_L2(gallery_feats) # Chuẩn hóa L2 cho IndexFlatIP
+    faiss.normalize_L2(gallery_feats) # Chuẩn hóa L2
     
     # 5. Build FAISS index
-    index = faiss.IndexFlatIP(cfg.EMBEDDING_SIZE)
+    index = faiss.IndexFlatIP(cfg.EMBEDDING_SIZE) # IP = Inner Product (Cosine Similarity)
     index.add(gallery_feats)
     faiss.write_index(index, cfg.FAISS_INDEX_PATH)
     print(f"FAISS index with {index.ntotal} identities saved to {cfg.FAISS_INDEX_PATH}")
 
-    # 6. Lưu id2name và name2path mappings
+    # 6. Lưu bản đồ (mappings)
     id2name = {}
     name2path = {}
     for faiss_idx, lab_idx in enumerate(gallery_labels):
         name = class_names[lab_idx]
         id2name[faiss_idx] = name
         
+        # Tìm MỘT ảnh đại diện cho người này
         if name not in name2path:
             for path, label_index in dataset.imgs:
                 if label_index == lab_idx:
-                    name2path[name] = path
+                    name2path[name] = path # Lưu đường dẫn file hệ thống
                     break
 
     with open(cfg.ID2NAME_PATH, "w", encoding="utf-8") as f:
-        for idx, name in id2name.items():
-            f.write(f"{idx}\t{name}\n")
+        json.dump(id2name, f, ensure_ascii=False, indent=4)
     print(f"ID-to-Name mapping saved to {cfg.ID2NAME_PATH}")
 
     with open(cfg.NAME2PATH_PATH, "w", encoding="utf-8") as f:
         json.dump(name2path, f, ensure_ascii=False, indent=4)
     print(f"Name-to-Path mapping saved to {cfg.NAME2PATH_PATH}")
     
-    # 7. Save embeddings & labels for visualization
+    # 7. Lưu feats để trực quan hóa (optional)
     np.save(os.path.join(cfg.OUTPUT_DIR, "gallery_feats.npy"), gallery_feats)
     np.save(os.path.join(cfg.OUTPUT_DIR, "gallery_labels.npy"), gallery_labels)
-    print("Saved gallery_feats.npy and gallery_labels.npy for visualization.")
+    print("Saved gallery features for visualization.")
 
 if __name__ == "__main__":
     build_gallery()

@@ -1,3 +1,5 @@
+// main.js (ĐÃ SỬA ĐỂ TẢI THUMBNAIL TỪ URL)
+
 document.addEventListener('DOMContentLoaded', function() {
     const videoContainer = document.querySelector('.video-container');
     if (!videoContainer) {
@@ -5,43 +7,42 @@ document.addEventListener('DOMContentLoaded', function() {
         return;
     }
     
-    // Đọc số lượng stream từ thẻ HTML (được tạo bởi Python)
     const stream_count = parseInt(videoContainer.dataset.streamCount, 10);
     const contexts = new Map(); 
 
     /**
      * Hàm render danh sách nhận diện vào sidebar
-     * Hàm này sẽ xóa sidebar cũ và tạo lại toàn bộ
      */
     const renderIdentitySidebar = (stream_id, identities) => {
         const sidebar = document.getElementById(`identity-sidebar-${stream_id}`);
         if (!sidebar) return;
 
-        // Xóa sạch nội dung sidebar cũ để cập nhật danh sách mới nhất
-        sidebar.innerHTML = ''; 
+        sidebar.innerHTML = ''; // Xóa sạch nội dung sidebar cũ
 
         if (identities.length === 0) {
             sidebar.innerHTML = '<p class="sidebar-empty">Không có ai được nhận diện.</p>';
             return;
         }
 
-        // Tạo thẻ (card) cho mỗi người được nhận diện
         identities.forEach(person => {
-            // Tạo div bao ngoài
             const card = document.createElement('div');
             card.className = 'identity-card';
 
-            // Tạo thẻ ảnh thumbnail
             const img = document.createElement('img');
-            img.src = "data:image/jpeg;base64," + person.thumb; // Lấy thumbnail base64
+            
+            // --- THAY ĐỔI LỚN DUY NHẤT Ở ĐÂY ---
+            // 'person.thumb' giờ là một URL (ví dụ: /gallery_images/John/01.jpg)
+            // Nếu nó là null hoặc rỗng, chúng ta không đặt src (nó sẽ hiển thị nền mặc định)
+            if (person.thumb) {
+                 img.src = person.thumb; 
+            }
+            // ------------------------------------
+
             img.className = 'identity-thumb';
 
-            // Tạo thẻ tên
             const nameTag = document.createElement('p');
             nameTag.className = 'identity-name';
             nameTag.innerText = person.name;
-            
-            // QUAN TRỌNG: Áp dụng màu sắc (đã được server gửi ở định dạng CSS)
             nameTag.style.color = person.color;
 
             card.appendChild(img);
@@ -51,7 +52,7 @@ document.addEventListener('DOMContentLoaded', function() {
     };
 
     /**
-     * Hàm thiết lập kết nối WebSocket cho mỗi stream
+     * Hàm thiết lập kết nối WebSocket
      */
     const setupWebSocket = (stream_id) => {
         const canvas = document.getElementById('video-stream-' + stream_id);
@@ -82,8 +83,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 };
                 image.src = 'data:image/jpeg;base64,' + data.image;
 
-                // 2. LOGIC MỚI: Render sidebar
-                // (Server không còn gửi 'count', thay vào đó là 'identities')
+                // 2. Render sidebar (như cũ)
                 renderIdentitySidebar(data.stream_id, data.identities);
 
             } catch (e) {

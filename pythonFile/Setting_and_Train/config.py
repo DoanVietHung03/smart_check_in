@@ -24,7 +24,7 @@ class Config:
     
     # --- Training & Fine-tuning ---
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    BATCH_SIZE = 32
+    BATCH_SIZE = 1
     EPOCHS = 100 
     LR = 1e-4
     WEIGHT_DECAY = 5e-4

@@ -94,6 +94,10 @@ def get_transforms():
     
     val_transform = transforms.Compose([
         transforms.Resize(cfg.IMG_SIZE),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+        transforms.GaussianBlur(kernel_size=(3, 3)),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])

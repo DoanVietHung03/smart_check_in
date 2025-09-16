@@ -18,3 +18,4 @@ venv
 # Không cần dữ liệu training hoặc ảnh debug trong image production
 Dataset_Recognition/
 aligned_debug/
+Gallery/

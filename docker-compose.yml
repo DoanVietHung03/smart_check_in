@@ -18,8 +18,8 @@ services:
     restart: always
     entrypoint: ["/bin/sh", "-c"]
     command: >
-      "ffmpeg -re -stream_loop -1 -err_detect ignore_err -i /videos/vid_test_1.mp4 -c copy -f rtsp rtsp://rtsp-server:8554/mystream1
-      & ffmpeg -re -stream_loop -1 -err_detect ignore_err -i /videos/vid_test_2.mp4 -c copy -f rtsp rtsp://rtsp-server:8554/mystream2
+      "ffmpeg -re -stream_loop -1 -err_detect ignore_err -i /videos/vid_test_1.mp4 -c:v libx264 -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/mystream1
+      & ffmpeg -re -stream_loop -1 -err_detect ignore_err -i /videos/vid_test_2.mp4 -c:v libx264 -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/mystream2
       && wait"
   
   db:

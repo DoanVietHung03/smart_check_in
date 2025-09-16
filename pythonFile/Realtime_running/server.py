@@ -61,10 +61,10 @@ RTSP_URLS = [
 ]
 
 # IO / Model
-RESIZE_PERCENT = 50
+RESIZE_PERCENT = 100
 LOST_TRACK_BUFFER = 30
 USE_LATEST_ONLY = True
-JPEG_QUALITY = 80
+JPEG_QUALITY = 100
 CACHE_TTL_SECONDS = 5.0 # Thời gian xóa cache
 SESSION_TIMEOUT_SECONDS = 300.0 # (5 phút) Xóa người khỏi sidebar nếu không thấy
 THUMBNAIL_SIZE = (96, 96) # Kích thước cho ảnh thumbnail
@@ -265,6 +265,7 @@ class VideoProcessor:
                 if not ret:
                     logger.error(f'Stream {self.stream_id} bị ngắt. Đang kết nối lại...')
                     break
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
                 if RESIZE_PERCENT != 100:
                     h, w = frame.shape[:2]
                     nh, nw = int(h * RESIZE_PERCENT / 100), int(w * RESIZE_PERCENT / 100)
@@ -295,7 +296,6 @@ class VideoProcessor:
 
     def process_and_draw_frame(self, frame: cv2.Mat):
         """
-        LOGIC CHÍNH ĐÃ NÂNG CẤP:
         Tạo và duy trì một "Nhật ký phiên" (self.recently_seen) của những người được nhận diện,
         chỉ xóa họ nếu họ vắng mặt quá SESSION_TIMEOUT_SECONDS.
         """

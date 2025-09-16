@@ -6,7 +6,7 @@ from tqdm import tqdm
 import numpy as np
 
 from config import cfg
-from model import iresnet34, ArcMarginProduct
+from model import iresnet50, ArcMarginProduct
 from utils import get_transforms, get_dataloaders
 
 def finetune():
@@ -18,7 +18,7 @@ def finetune():
     print(f"Fine-tuning for {num_classes} identities.")
 
     # 1. Model & Head
-    model = iresnet34(fp16=False).to(cfg.DEVICE)
+    model = iresnet50(fp16=False).to(cfg.DEVICE)
     arcface_head = ArcMarginProduct(cfg.EMBEDDING_SIZE, num_classes, s=cfg.ARCFACE_S, m=cfg.ARCFACE_M).to(cfg.DEVICE)
 
     # 2. Load pre-trained weights
@@ -92,7 +92,6 @@ def finetune():
             avg_val_loss = epoch_val_loss / len(val_loader)
             print(f"Epoch {epoch}/{cfg.EPOCHS} - Average Validation Loss: {avg_val_loss:.4f}")
 
-            # --- MODEL CHECKPOINTING ---
             # --- MODEL CHECKPOINTING & EARLY STOPPING LOGIC ---
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss

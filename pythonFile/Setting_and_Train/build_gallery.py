@@ -10,14 +10,14 @@ import json
 import sys
 
 from config import cfg
-from model import iresnet34
+from model import iresnet50
 from utils import FaceDetector, align_face, get_transforms
 
 def build_gallery():
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     
     # 1. Load model nhận diện khuôn mặt
-    model = iresnet34(fp16=False).to(cfg.DEVICE)
+    model = iresnet50(fp16=False).to(cfg.DEVICE)
     try:
         ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=cfg.DEVICE, weights_only=True)
         # Tải với strict=False vì chúng ta chỉ tải backbone (thân mô hình), không phải head phân loại
@@ -84,17 +84,12 @@ def build_gallery():
         print("FATAL: No features extracted. Cannot build gallery. Did you add photos to Dataset_Recognition/train/?")
         return
 
-    # 4. Tính embedding trung bình
-    gallery_feats = []
-    gallery_labels = []
-    all_feats = np.vstack(all_feats)
-    all_labels = np.array(all_labels)
-
-    for lab_idx in sorted(set(all_labels)):
-        # Tính trung bình tất cả các vector của cùng một người để tạo 1 vector "nguyên mẫu"
-        gallery_feats.append(all_feats[all_labels == lab_idx].mean(axis=0))
-        gallery_labels.append(lab_idx)
-
+    # 4. === THAY ĐỔI LOGIC TỪ ĐÂY ===
+    # KHÔNG TÍNH TRUNG BÌNH NỮA. Sử dụng TẤT CẢ các feats.
+    
+    gallery_feats = np.vstack(all_feats) # Chuyển list các array (1, 512) thành 1 array (N, 512)
+    gallery_labels = np.array(all_labels) # Chuyển list các label_idx thành 1 array (N,)
+    
     gallery_feats = np.array(gallery_feats, dtype='float32')
     faiss.normalize_L2(gallery_feats) # Chuẩn hóa L2
     
@@ -102,25 +97,28 @@ def build_gallery():
     index = faiss.IndexFlatIP(cfg.EMBEDDING_SIZE) # IP = Inner Product (Cosine Similarity)
     index.add(gallery_feats)
     faiss.write_index(index, cfg.FAISS_INDEX_PATH)
-    print(f"FAISS index with {index.ntotal} identities saved to {cfg.FAISS_INDEX_PATH}")
+    # Lưu ý: index.ntotal bây giờ là TỔNG SỐ ẢNH, không phải tổng số người
+    print(f"FAISS index with {index.ntotal} TOTAL IMAGES saved to {cfg.FAISS_INDEX_PATH}") 
 
     # 6. Lưu bản đồ (mappings)
-    id2name = {}
+    id2name = {} # Map này bây giờ sẽ map: FAISS_Index -> Tên
     name2path = {}
+    
     for faiss_idx, lab_idx in enumerate(gallery_labels):
         name = class_names[lab_idx]
-        id2name[faiss_idx] = name
+        id2name[faiss_idx] = name # Ví dụ: {0: "John", 1: "John", 2: "Jane", ...}
         
-        # Tìm MỘT ảnh đại diện cho người này
+        # Tìm MỘT ảnh đại diện cho người này (logic này vẫn giữ nguyên)
         if name not in name2path:
             for path, label_index in dataset.imgs:
                 if label_index == lab_idx:
                     name2path[name] = path # Lưu đường dẫn file hệ thống
                     break
+    # === KẾT THÚC THAY ĐỔI LOGIC ===
 
     with open(cfg.ID2NAME_PATH, "w", encoding="utf-8") as f:
         json.dump(id2name, f, ensure_ascii=False, indent=4)
-    print(f"ID-to-Name mapping saved to {cfg.ID2NAME_PATH}")
+    print(f"ID-to-Name (Index-to-Name) mapping saved to {cfg.ID2NAME_PATH}")
 
     with open(cfg.NAME2PATH_PATH, "w", encoding="utf-8") as f:
         json.dump(name2path, f, ensure_ascii=False, indent=4)

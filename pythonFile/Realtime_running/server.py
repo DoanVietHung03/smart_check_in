@@ -48,7 +48,7 @@ setting_and_train_dir = os.path.join(project_root, "Setting_and_Train")
 sys.path.append(setting_and_train_dir)
 
 from config import cfg
-from model import iresnet34
+from model import iresnet50
 from utils import align_face, get_transforms, load_id2name
 
 logger.info("Imports completed. Loading models...")
@@ -62,7 +62,7 @@ RTSP_URLS = [
 ]
 
 # IO / Model
-RESIZE_PERCENT = 70
+RESIZE_PERCENT = 100
 LOST_TRACK_BUFFER = 30
 USE_LATEST_ONLY = True
 JPEG_QUALITY = 100
@@ -78,7 +78,7 @@ DETECTOR_MODEL.fuse()
 logger.info("Global Face Detector (YOLO) loaded.")
 
 # 2. Recognizer
-RECOGNIZER_MODEL = iresnet34(fp16=False).to(DEVICE)
+RECOGNIZER_MODEL = iresnet50(fp16=False).to(DEVICE)
 ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=DEVICE, weights_only=True)
 RECOGNIZER_MODEL.load_state_dict(ckpt, strict=False)
 RECOGNIZER_MODEL.eval()
@@ -348,7 +348,7 @@ class VideoProcessor:
         # 3. Vòng lặp chính: Cập nhật cache, Gửi đi nhận dạng, VÀ CẬP NHẬT PHIÊN SIDEBAR
         for i in range(len(tracked_detections)):
             xyxy = tracked_detections.xyxy[i]
-            tracker_id = int(tracked_detections.tracker_id[i]) # Đảm bảo là Python int
+            tracker_id = int(tracked_detections.tracker_id[i])
             landmark = tracked_detections.data['landmarks'][i]
 
             with cache_lock: cached_result = recognition_cache.get(tracker_id)

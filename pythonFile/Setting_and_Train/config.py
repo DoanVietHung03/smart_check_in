@@ -11,7 +11,7 @@ class Config:
     
     # Các đường dẫn khác sẽ tự động đúng
     DETECTOR_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_detection_yolo", "yolov11n-face.pt")
-    PRETRAINED_RECOGNITION_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_recognition_iResNet", "arcFace_r34.pth")
+    PRETRAINED_RECOGNITION_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_recognition_iResNet", "arcFace_r50.pth")
 
     FAISS_INDEX_PATH = os.path.join(OUTPUT_DIR, "faiss_gallery.idx")
     ID2NAME_PATH = os.path.join(OUTPUT_DIR, "id2name.txt")

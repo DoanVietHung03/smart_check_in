@@ -1,5 +1,3 @@
-// main.js (ĐÃ SỬA ĐỂ TẢI THUMBNAIL TỪ URL)
-
 document.addEventListener('DOMContentLoaded', function() {
     const videoContainer = document.querySelector('.video-container');
     if (!videoContainer) {
@@ -17,38 +15,56 @@ document.addEventListener('DOMContentLoaded', function() {
         const sidebar = document.getElementById(`identity-sidebar-${stream_id}`);
         if (!sidebar) return;
 
-        sidebar.innerHTML = ''; // Xóa sạch nội dung sidebar cũ
-
-        if (identities.length === 0) {
-            sidebar.innerHTML = '<p class="sidebar-empty">Không có ai được nhận diện.</p>';
-            return;
-        }
-
-        identities.forEach(person => {
-            const card = document.createElement('div');
-            card.className = 'identity-card';
-
-            const img = document.createElement('img');
-            
-            // --- THAY ĐỔI LỚN DUY NHẤT Ở ĐÂY ---
-            // 'person.thumb' giờ là một URL (ví dụ: /gallery_images/John/01.jpg)
-            // Nếu nó là null hoặc rỗng, chúng ta không đặt src (nó sẽ hiển thị nền mặc định)
-            if (person.thumb) {
-                 img.src = person.thumb; 
-            }
-            // ------------------------------------
-
-            img.className = 'identity-thumb';
-
-            const nameTag = document.createElement('p');
-            nameTag.className = 'identity-name';
-            nameTag.innerText = person.name;
-            nameTag.style.color = person.color;
-
-            card.appendChild(img);
-            card.appendChild(nameTag);
-            sidebar.appendChild(card);
+        // 1. Lấy danh sách TÊN hiện đang có trong sidebar
+        const existingNames = new Set();
+        sidebar.querySelectorAll('.identity-card').forEach(card => {
+            existingNames.add(card.dataset.name); // Sử dụng data-name
         });
+
+        // 2. Lấy danh sách TÊN mới từ server
+         const newNames = new Set(identities.map(p => p.name));
+
+        // 3. XÓA những card có Tên không còn trong danh sách mới
+        sidebar.querySelectorAll('.identity-card').forEach(card => {
+            if (!newNames.has(card.dataset.name)) {
+                card.remove(); // Xóa người đã rời đi
+            }
+        });
+
+        // 4. THÊM những người có Tên mới mà chưa có trong sidebar
+        identities.forEach(person => {
+            // Nếu TÊN này chưa có trong sidebar, chúng ta mới tạo và thêm vào
+            if (!existingNames.has(person.name)) {
+                const card = document.createElement('div');
+                card.className = 'identity-card';
+                // Gán tracker_id vào 'data-id' để theo dõi
+                card.dataset.name = person.name; // Gán TÊN vào 'data-name'
+
+                const img = document.createElement('img');
+                if (person.thumb) {
+                    img.src = person.thumb; 
+                }
+                img.className = 'identity-thumb';
+
+                const nameTag = document.createElement('p');
+                nameTag.className = 'identity-name';
+                nameTag.innerText = person.name;
+                nameTag.style.color = person.color;
+
+                card.appendChild(img);
+                card.appendChild(nameTag);
+                sidebar.appendChild(card); // Thêm người mới
+            }
+            // Nếu người đó đã tồn tại (existingIDs.has(personIDStr) == true), chúng ta không làm gì cả
+        });
+        
+        // 5. Xử lý thông báo "rỗng"
+        const emptyMsg = sidebar.querySelector('.sidebar-empty');
+        if (sidebar.querySelectorAll('.identity-card').length > 0) {
+             if (emptyMsg) emptyMsg.remove();
+        } else if (!emptyMsg) {
+             sidebar.innerHTML = '<p class="sidebar-empty">Không có ai được nhận diện.</p>';
+        }
     };
 
     /**
@@ -72,7 +88,7 @@ document.addEventListener('DOMContentLoaded', function() {
             try {
                 const data = JSON.parse(ev.data);
 
-                // 1. Vẽ khung hình video chính (như cũ)
+                // 1. Vẽ khung hình video chính
                 const image = new Image();
                 image.onload = () => {
                     if (ctx.canvas.width !== image.width || ctx.canvas.height !== image.height) {
@@ -83,7 +99,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 };
                 image.src = 'data:image/jpeg;base64,' + data.image;
 
-                // 2. Render sidebar (như cũ)
+                // 2. Render sidebar (vẫn gọi hàm này, nhưng logic bên trong đã thay đổi)
                 renderIdentitySidebar(data.stream_id, data.identities);
 
             } catch (e) {

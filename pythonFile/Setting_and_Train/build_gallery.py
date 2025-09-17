@@ -10,18 +10,18 @@ import json
 import sys
 
 from config import cfg
-from model import iresnet50
+from model import iresnet100
 from utils import FaceDetector, align_face, get_transforms
 
 def build_gallery():
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     
     # 1. Load model nhận diện khuôn mặt
-    model = iresnet50(fp16=False).to(cfg.DEVICE)
+    model = iresnet100(fp16=False).to(cfg.DEVICE)
     try:
-        ckpt = torch.load(cfg.BEST_FINETUNED_MODEL_PATH, map_location=cfg.DEVICE)
-        model.load_state_dict(ckpt, strict=False) 
-        print(f"Successfully loaded PRE-TRAINED weights from: {cfg.BEST_FINETUNED_MODEL_PATH}")
+        ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=cfg.DEVICE)
+        model.load_state_dict(ckpt, strict=True)
+        print(f"Successfully loaded FINE-TUNED weights from: {cfg.PRETRAINED_RECOGNITION_MODEL_PATH}")
     except Exception as e:
         print(f"FATAL: Could not load pre-trained weights. Error: {e}")
         return
@@ -37,7 +37,7 @@ def build_gallery():
     all_feats = []
     all_labels = []
     
-    train_dir = os.path.join(cfg.DATA_ROOT, "train")
+    train_dir = cfg.DATA_ROOT
     dataset = datasets.ImageFolder(train_dir)
     
     # Lấy class_names trực tiếp từ dataset (đáng tin cậy hơn là từ checkpoint)
@@ -47,7 +47,7 @@ def build_gallery():
         return
     print(f"Found {len(class_names)} identities. Building gallery...")
 
-    ALIGNED_DEBUG_DIR = os.path.join(cfg.BASE_DIR, "..", "..", "aligned_debug") # Sửa đường dẫn cho đúng
+    ALIGNED_DEBUG_DIR = os.path.join(cfg.OUTPUT_DIR, "aligned_debug") # Sửa đường dẫn cho đúng
     os.makedirs(ALIGNED_DEBUG_DIR, exist_ok=True)
     print(f"Saving aligned faces for debugging in: {ALIGNED_DEBUG_DIR}")
     
@@ -59,21 +59,32 @@ def build_gallery():
             if len(boxes) >= 1:
                 # Chỉ lấy khuôn mặt lớn nhất (đầu tiên) nếu có nhiều
                 aligned_face = align_face(image_np, landmarks[0], boxes[0])
-                
-                # Lưu ảnh đã căn chỉnh
-                person_name = class_names[label_idx]
-                person_debug_dir = os.path.join(ALIGNED_DEBUG_DIR, person_name)
-                os.makedirs(person_debug_dir, exist_ok=True)
-                img_to_save = Image.fromarray(aligned_face)
-                img_to_save.save(os.path.join(person_debug_dir, os.path.basename(path)))
-                
-                face_tensor = transform(Image.fromarray(aligned_face)).unsqueeze(0).to(cfg.DEVICE)
-                
-                with torch.no_grad():
-                    feat = model(face_tensor).cpu().numpy()
-                
-                all_feats.append(feat)
-                all_labels.append(label_idx)
+                try:
+                    # 1. Xử lý ảnh gốc
+                    face_tensor_orig = transform(Image.fromarray(aligned_face)).unsqueeze(0).to(cfg.DEVICE)
+                    with torch.no_grad():
+                        feat_orig = model(face_tensor_orig).cpu().numpy()
+                    
+                    all_feats.append(feat_orig)
+                    all_labels.append(label_idx)
+
+                    # 2. Xử lý ảnh lật ngang (Flipped)
+                    aligned_face_flipped = np.fliplr(aligned_face).copy()
+                    face_tensor_flipped = transform(Image.fromarray(aligned_face_flipped)).unsqueeze(0).to(cfg.DEVICE)
+                    with torch.no_grad():
+                        feat_flipped = model(face_tensor_flipped).cpu().numpy()
+                    
+                    all_feats.append(feat_flipped)
+                    all_labels.append(label_idx) # Vẫn là label đóng góp bởi cùng một người
+                    
+                    # Lưu ảnh đã căn chỉnh
+                    person_name = class_names[label_idx]
+                    person_debug_dir = os.path.join(ALIGNED_DEBUG_DIR, person_name)
+                    os.makedirs(person_debug_dir, exist_ok=True)
+                    img_to_save = Image.fromarray(aligned_face)
+                    img_to_save.save(os.path.join(person_debug_dir, os.path.basename(path)))
+                except Exception as e:
+                    print(f"Skipping {path} due to error: {e}")
             else:
                  print(f"Warning: No face detected in {path}. Skipping.")
         except Exception as e:
@@ -101,15 +112,25 @@ def build_gallery():
     id2name = {} # Map này bây giờ sẽ map: FAISS_Index -> Tên
     name2path = {}
     
+    # Lấy đường dẫn gốc của gallery để tính toán đường dẫn tương đối
+    data_root_path = os.path.abspath(cfg.DATA_ROOT)
+    
     for faiss_idx, lab_idx in enumerate(gallery_labels):
         name = class_names[lab_idx]
         id2name[faiss_idx] = name # Ví dụ: {0: "John", 1: "John", 2: "Jane", ...}
         
-        # Tìm MỘT ảnh đại diện cho người này (logic này vẫn giữ nguyên)
+        # Tìm MỘT ảnh đại diện cho người này để lưu vào name2path
         if name not in name2path:
             for path, label_index in dataset.imgs:
                 if label_index == lab_idx:
-                    name2path[name] = path # Lưu đường dẫn file hệ thống
+                    # 1. Lấy đường dẫn tương đối
+                    rel_path = os.path.relpath(path, data_root_path)
+                    
+                    # 2. Chuyển đổi sang định dạng URL (dùng dấu /)
+                    web_path = rel_path.replace(os.path.sep, '/')
+                    
+                    # 3. Lưu đường dẫn web tương đối
+                    name2path[name] = web_path
                     break
 
     with open(cfg.ID2NAME_PATH, "w", encoding="utf-8") as f:

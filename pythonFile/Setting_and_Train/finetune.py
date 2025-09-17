@@ -44,29 +44,29 @@ def finetune():
         model.train()
         arcface_head.train()
         
-        epoch_train_loss = 0.0
+        epoch_train_loss_running = 0.0
         
         # Lấy learning rate hiện tại để hiển thị
         current_lr = scheduler.get_last_lr()[0]
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.EPOCHS} | LR: {current_lr:.1e}")
         
-        for imgs, labels in pbar:
+        for i, (imgs, labels) in enumerate(pbar):
             imgs, labels = imgs.to(cfg.DEVICE), labels.to(cfg.DEVICE)
             
             emb = model(imgs)
             logits = arcface_head(emb, labels)
             loss = criterion(logits, labels)
             
-            epoch_train_loss += loss.item() # <-- Thêm loss của batch vào
+            epoch_train_loss_running += loss.item() # <-- Thêm loss của batch vào
             
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
+            pbar.set_postfix(avg_loss=f"{epoch_train_loss_running / (i+1):.4f}")
         
         # In ra loss trung bình của epoch
-        avg_epoch_loss = epoch_train_loss / len(train_loader)
+        avg_epoch_loss = epoch_train_loss_running / len(train_loader)
         print(f"Epoch {epoch}/{cfg.EPOCHS} - Average Loss: {avg_epoch_loss:.4f}")
         
         scheduler.step()
@@ -75,21 +75,22 @@ def finetune():
         if val_loader is not None:
             model.eval()
             arcface_head.eval()
-            epoch_val_loss = 0.0
+            epoch_val_loss_running = 0.0
             
             with torch.no_grad():
                 val_pbar = tqdm(val_loader, desc=f"Epoch {epoch}/{cfg.EPOCHS} | Validation")
-                for imgs, labels in val_pbar:
+                for i, (imgs, labels) in enumerate(val_pbar):
                     imgs, labels = imgs.to(cfg.DEVICE), labels.to(cfg.DEVICE)
                     
                     emb = model(imgs)
                     logits = arcface_head(emb, labels)
                     loss = criterion(logits, labels)
                     
-                    epoch_val_loss += loss.item()
-                    val_pbar.set_postfix(loss=f"{loss.item():.4f}")
+                    epoch_val_loss_running += loss.item()
 
-            avg_val_loss = epoch_val_loss / len(val_loader)
+                    val_pbar.set_postfix(avg_loss=f"{epoch_val_loss_running / (i+1):.4f}")
+
+            avg_val_loss = epoch_val_loss_running / len(val_loader)
             print(f"Epoch {epoch}/{cfg.EPOCHS} - Average Validation Loss: {avg_val_loss:.4f}")
 
             # --- MODEL CHECKPOINTING & EARLY STOPPING LOGIC ---

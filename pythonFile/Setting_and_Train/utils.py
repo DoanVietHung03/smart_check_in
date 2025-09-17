@@ -94,13 +94,9 @@ def get_transforms():
     
     val_transform = transforms.Compose([
         transforms.Resize(cfg.IMG_SIZE),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-        transforms.GaussianBlur(kernel_size=(3, 3)),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    ])
+    ])  
     return train_transform, val_transform
 
 def get_dataloaders(data_root, train_transform, val_transform):
@@ -119,10 +115,8 @@ def get_dataloaders(data_root, train_transform, val_transform):
     return train_loader, val_loader, class_names
 
 def load_id2name(path):
-    id2name = {}
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            if '\t' in line:
-                idx, name = line.strip().split('\t')
-                id2name[int(idx)] = name
+    with open(cfg.ID2NAME_PATH, "r", encoding="utf-8") as f:
+        id2name = json.load(f)
+    # convert key về int
+    id2name = {int(k): v for k, v in id2name.items()}
     return id2name

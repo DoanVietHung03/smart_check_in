@@ -48,7 +48,7 @@ setting_and_train_dir = os.path.join(project_root, "Setting_and_Train")
 sys.path.append(setting_and_train_dir)
 
 from config import cfg
-from model import iresnet50
+from model import iresnet100
 from utils import align_face, get_transforms, load_id2name
 
 logger.info("Imports completed. Loading models...")
@@ -62,8 +62,8 @@ RTSP_URLS = [
 ]
 
 # IO / Model
-RESIZE_PERCENT = 100
-LOST_TRACK_BUFFER = 30
+RESIZE_PERCENT = 80
+LOST_TRACK_BUFFER = 50
 USE_LATEST_ONLY = True
 JPEG_QUALITY = 100
 CACHE_TTL_SECONDS = 5.0 # Thời gian xóa cache
@@ -78,14 +78,12 @@ DETECTOR_MODEL.fuse()
 logger.info("Global Face Detector (YOLO) loaded.")
 
 # 2. Recognizer
-RECOGNIZER_MODEL = iresnet50(fp16=False).to(DEVICE)
-# --- (SỬA LỖI 1) ---
-# Đã xóa `weights_only=True` vì file checkpoint là một dictionary
-ckpt = torch.load(cfg.BEST_FINETUNED_MODEL_PATH, map_location=DEVICE) 
+RECOGNIZER_MODEL = iresnet100(fp16=False).to(DEVICE)
+ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=DEVICE)
 RECOGNIZER_MODEL.load_state_dict(ckpt, strict=False)
 # --------------------
 RECOGNIZER_MODEL.eval()
-logger.info(f"Global Face Recognizer (iResNet) loaded from: {cfg.BEST_FINETUNED_MODEL_PATH}")
+logger.info(f"Global Face Recognizer (iResNet) loaded from: {cfg.PRETRAINED_RECOGNITION_MODEL_PATH}")
 
 # 3. Gallery
 FAISS_INDEX = faiss.read_index(cfg.FAISS_INDEX_PATH)
@@ -103,17 +101,12 @@ NAME2COLOR.update({"Unknown": (0, 0, 255), "Processing...": (192, 192, 192), "Er
 
 NAME_TO_WEB_PATH = {}
 try:
-    # Lấy đường dẫn tuyệt đối đến thư mục gốc dataset
-    data_root_path = os.path.join(os.path.abspath(cfg.DATA_ROOT), "train")
-    
     with open(cfg.NAME2PATH_PATH, 'r', encoding='utf-8') as f:
         name2path_fs = json.load(f) # Đường dẫn hệ thống tập tin
     
     for name, fs_path in name2path_fs.items():
-        # Lấy đường dẫn tương đối (ví dụ: train/John/01.jpg)
-        rel_path = os.path.relpath(os.path.abspath(fs_path), data_root_path)
         # Chuyển đổi sang định dạng URL và thêm tiền tố mount
-        web_path = f"/gallery_images/{rel_path.replace(os.path.sep, '/')}"
+        web_path = f"/gallery_images/{fs_path}"
         NAME_TO_WEB_PATH[name] = web_path
     
     logger.info(f"Đã tải {len(NAME_TO_WEB_PATH)} đường dẫn ảnh gallery và chuyển đổi sang URL web.")
@@ -147,27 +140,15 @@ def db_worker():
         finally:
             db_queue.task_done()
 
-# --- (SỬA LỖI 3) --- Đã xóa dòng Thread.start() trùng lặp
-
 # --- Pipeline 2: Recognition Worker (LOGIC VOTING NÂNG CẤP) ---
 recognition_queue = queue.Queue()
 recognition_cache = {} # Cache nhận dạng (ID -> Tên)
 cache_lock = threading.Lock()
 last_cache_clean_time = time.time()
 
-# --- (SỬA LỖI 2) --- THAY THẾ TOÀN BỘ HÀM BẰNG LOGIC VOTING
 def recognition_worker_thread():
     """Luồng chuyên dụng chỉ để chạy iResNet, tránh xung đột GPU."""
-    logger.info("[RECOG-WORKER] Recognition worker started (VOTING LOGIC).")
-    
-    # === CÁC HẰNG SỐ ĐIỀU CHỈNH CHO LOGIC VOTING ===
-    # 1. Số lượng "hàng xóm" (ảnh gallery) gần nhất để lấy về
-    VOTING_K = 7 
-    # 2. Ngưỡng điểm TỐI THIỂU để một ảnh gallery được "bỏ phiếu".
-    VOTING_THRESHOLD = 0.45 
-    # 3. Số phiếu bầu TỐI THIỂU để được công nhận danh tính.
-    VOTE_MIN_COUNT = 3
-    
+    logger.info("[RECOG-WORKER] Recognition worker started.")
     while True:
         try:
             item = recognition_queue.get()
@@ -176,17 +157,17 @@ def recognition_worker_thread():
             frame_copy, faces_to_process, stream_id = item
             current_time = time.time()
             batch_tensors = []
-            batch_tracker_ids = []
+            batch_keys = []
 
-            for tracker_id, landmark, xyxy in faces_to_process:
+            for composite_key, landmark, xyxy in faces_to_process:
                 try:
                     aligned_face = align_face(frame_copy, landmark, xyxy)
                     face_tensor = RECOG_TRANSFORM(Image.fromarray(aligned_face))
                     batch_tensors.append(face_tensor)
-                    batch_tracker_ids.append(tracker_id)
+                    batch_keys.append(composite_key)
                 except Exception:
                     with cache_lock:
-                        recognition_cache[tracker_id] = ("Error", 0.0, current_time)
+                        recognition_cache[composite_key] = ("Error", 0.0, current_time)
 
             if not batch_tensors:
                 recognition_queue.task_done()
@@ -198,77 +179,34 @@ def recognition_worker_thread():
                 feats_batch = RECOGNIZER_MODEL(batch_tensors).cpu().numpy()
             
             faiss.normalize_L2(feats_batch)
-            
-            # === LOGIC VOTING MỚI ===
-            # Tìm k hàng xóm gần nhất
-            scores_batch, indices_batch = FAISS_INDEX.search(feats_batch, VOTING_K)
+            scores_batch, indices_batch = FAISS_INDEX.search(feats_batch, 1)
 
-            for i, tracker_id in enumerate(batch_tracker_ids):
-                top_k_indices = indices_batch[i] # Array (VOTING_K,) các index FAISS
-                top_k_scores = scores_batch[i]  # Array (VOTING_K,) các điểm số
-                
-                votes = Counter()
-                
-                # Bỏ phiếu
-                for idx, score in zip(top_k_indices, top_k_scores):
-                    if score < VOTING_THRESHOLD:
-                        break # Mảng đã được sắp xếp, nên có thể dừng sớm
-                    
-                    # Lấy tên từ FAISS index (ID2NAME bây giờ là index -> name)
-                    # Phải dùng str(idx) vì ID2NAME tải từ JSON (key là string)
-                    name = ID2NAME.get(str(idx), "Unknown")
-                    
-                    if name != "Unknown":
-                        votes[name] += 1
-                
-                final_name = "Unknown"
-                final_score = 0.0
-
-                if votes:
-                    # Lấy người có nhiều phiếu bầu nhất
-                    most_common_vote = votes.most_common(1)[0]
-                    name = most_common_vote[0]
-                    vote_count = most_common_vote[1]
-                    
-                    # Kiểm tra xem có đủ số phiếu tối thiểu không
-                    if vote_count >= VOTE_MIN_COUNT:
-                        # Tính điểm trung bình của các phiếu bầu HỢP LỆ (chỉ của người chiến thắng)
-                        valid_scores = [s for s, idx in zip(top_k_scores, top_k_indices) 
-                                        if ID2NAME.get(str(idx)) == name and s >= VOTING_THRESHOLD]
-                        
-                        final_score = np.mean(valid_scores)
-                        
-                        # Sử dụng ngưỡng RECOGNITION_THRESHOLD từ config.py
-                        # để lọc kết quả CUỐI CÙNG (điểm trung bình)
-                        if final_score >= cfg.RECOGNITION_THRESHOLD:
-                            final_name = name
-                        else:
-                            final_name = "Unknown" # Điểm trung bình không đủ cao
-                    else:
-                        final_name = "Unknown" # Không đủ số phiếu
+            for i, composite_key in enumerate(batch_keys):
+                score = scores_batch[i][0]
+                idx = indices_batch[i][0]
+                name = "Unknown"
+                if score > cfg.RECOGNITION_THRESHOLD:
+                    name = ID2NAME.get(idx, "Unknown")
                 
                 # Cập nhật Cache toàn cục
                 with cache_lock:
-                    recognition_cache[tracker_id] = (final_name, final_score, current_time)
+                    recognition_cache[composite_key] = (name, score, current_time) # Dùng key tổng hợp
                 
                 # Nếu nhận dạng thành công -> Gửi tới DB Worker
-                if final_name != "Unknown":
+                if name != "Unknown":
                     db_event = {
                         "timestamp": datetime.now(), # Lấy thời gian hiện tại
                         "stream_id": stream_id,
-                        "tracker_id": tracker_id,
-                        "name": final_name,
-                        "score": float(final_score) # Lưu điểm trung bình
+                        "tracker_id": composite_key[1],
+                        "name": name,
+                        "score": float(score)
                     }
                     db_queue.put((stream_id, db_event)) # Gửi (stream_id, event) cho db_worker
-            # === KẾT THÚC LOGIC VOTING ===
 
             recognition_queue.task_done()
         except Exception as e:
             logger.error(f"[RECOG-WORKER] Lỗi nghiêm trọng: {e}")
             recognition_queue.task_done()
-
-# --- (SỬA LỖI 3) --- Đã xóa dòng Thread.start() trùng lặp
 
 # ====================== VIDEO PROCESSOR CLASS ======================
 class VideoProcessor:
@@ -381,10 +319,10 @@ class VideoProcessor:
             ids_to_remove = []
             with cache_lock:
                 try:
-                    for tracker_id, (_, _, timestamp) in recognition_cache.items():
-                        if current_time - timestamp > CACHE_TTL_SECONDS: ids_to_remove.append(tracker_id)
-                    for tracker_id in ids_to_remove:
-                        if tracker_id in recognition_cache: del recognition_cache[tracker_id]
+                    for key, (_, _, timestamp) in recognition_cache.items(): 
+                        if current_time - timestamp > CACHE_TTL_SECONDS: ids_to_remove.append(key)
+                    for key in ids_to_remove:
+                        if key in recognition_cache: del recognition_cache[key]
                 except RuntimeError: pass
             last_cache_clean_time = current_time
             if ids_to_remove: logger.info(f"[CACHE] Dọn dẹp {len(ids_to_remove)} ID quá hạn.")
@@ -398,6 +336,9 @@ class VideoProcessor:
 
         faces_to_process_queue = []
         new_faces_found = False
+        
+        # Set các tên đã được xử lý trong frame này (để tránh xử lý 1 tên 2 lần)
+        names_processed_this_frame = set() 
 
         # 3. Vòng lặp chính: Cập nhật cache, Gửi đi nhận dạng, VÀ CẬP NHẬT PHIÊN SIDEBAR
         for i in range(len(tracked_detections)):
@@ -405,43 +346,47 @@ class VideoProcessor:
             tracker_id = int(tracked_detections.tracker_id[i])
             landmark = tracked_detections.data['landmarks'][i]
 
-            with cache_lock: cached_result = recognition_cache.get(tracker_id)
+            # Tạo key tổng hợp (stream_id, tracker_id)
+            composite_key = (self.stream_id, tracker_id)
+            # Đọc cache bằng key tổng hợp
+            with cache_lock: cached_result = recognition_cache.get(composite_key)
 
             if cached_result is None:
-                faces_to_process_queue.append((tracker_id, landmark, xyxy))
-                with cache_lock: recognition_cache[tracker_id] = ("Processing...", 0.0, current_time)
+                # Gửi key tổng hợp đi nhận dạng
+                faces_to_process_queue.append((composite_key, landmark, xyxy))
+                with cache_lock: recognition_cache[composite_key] = ("Processing...", 0.0, current_time)
                 new_faces_found = True
             else:
                 name, score, _ = cached_result
                 if name == "Unknown":
                     new_faces_found = True
-                    faces_to_process_queue.append((tracker_id, landmark, xyxy))
+                    faces_to_process_queue.append((composite_key, landmark, xyxy))
                 
                 with cache_lock: # Cập nhật timestamp cho cache
-                    recognition_cache[tracker_id] = (name, score, current_time)
+                    recognition_cache[composite_key] = (name, score, current_time)
 
-                if name not in ["Processing...", "Unknown", "Error"]:
+                if name not in ["Processing...", "Unknown", "Error"] and name not in names_processed_this_frame:
                     with self.session_lock:
-                        if tracker_id not in self.recently_seen:
-                            # LẦN ĐẦU THẤY: Chỉ cần tra cứu đường dẫn và màu sắc (không crop/encode)
+                        if name not in self.recently_seen: # Key bằng TÊN
+                            # LẦN ĐẦU THẤY TÊN NÀY:
                             logger.info(f"[Stream {self.stream_id}] Phát hiện người mới vào phiên: {name} (ID: {tracker_id})")
                             
                             color_bgr = NAME2COLOR.get(name, (0,0,255))
                             color_css = f"rgb({color_bgr[2]}, {color_bgr[1]}, {color_bgr[0]})"
+                            thumb_web_path = NAME_TO_WEB_PATH.get(name, None)
                             
-                            # Tra cứu đường dẫn ảnh đại diện từ gallery
-                            thumb_web_path = NAME_TO_WEB_PATH.get(name, None) # Lấy URL web đã chuyển đổi
-                            
-                            self.recently_seen[tracker_id] = {
-                                "id": tracker_id,
+                            self.recently_seen[name] = { # Key bằng TÊN
+                                "id": name, # ID cho Javascript giờ là TÊN
                                 "name": name,
                                 "color": color_css,
-                                "thumb": thumb_web_path, # Gửi URL (hoặc None)
+                                "thumb": thumb_web_path,
                                 "last_seen": current_time
                             }
                         else:
-                            # ĐÃ THẤY: Chỉ cập nhật timestamp
-                            self.recently_seen[tracker_id]['last_seen'] = current_time
+                            # ĐÃ THẤY TÊN NÀY: Chỉ cập nhật timestamp
+                            self.recently_seen[name]['last_seen'] = current_time
+                    
+                    names_processed_this_frame.add(name) # Đánh dấu đã xử lý tên này
 
         if new_faces_found and faces_to_process_queue:
             recognition_queue.put((frame_rgb.copy(), faces_to_process_queue, self.stream_id))
@@ -452,7 +397,10 @@ class VideoProcessor:
             xyxy, _, _, _, tracker_id_raw, _ = detection
             tracker_id = int(tracker_id_raw) # Ép kiểu int
             
-            with cache_lock: name, score, _ = recognition_cache.get(tracker_id, ("Processing...", 0.0, 0))
+            # Đọc cache để vẽ
+            composite_key = (self.stream_id, tracker_id)
+            with cache_lock: name, score, _ = recognition_cache.get(composite_key, ("Processing...", 0.0, 0))
+            
             label = f"{name} ({score:.2f})"
             x1, y1, x2, y2 = [int(coord) for coord in xyxy]
             color_bgr = NAME2COLOR.get(name, (0, 0, 255))
@@ -461,18 +409,19 @@ class VideoProcessor:
             cv2.putText(annotated_frame, label, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_bgr, 2)
 
         # 5. DỌN DẸP PHIÊN SIDEBAR (Xóa người cũ)
-        ids_to_remove_from_session = []
+        names_to_remove_from_session = [] # Giờ là danh sách TÊN
         with self.session_lock:
-            for tid, data in self.recently_seen.items():
+            # === SỬA LỖI B ===
+            for name, data in self.recently_seen.items(): # Key là TÊN
                 if current_time - data['last_seen'] > SESSION_TIMEOUT_SECONDS:
-                    ids_to_remove_from_session.append(tid)
+                    names_to_remove_from_session.append(name)
             
-            for tid in ids_to_remove_from_session:
-                del self.recently_seen[tid]
-                logger.info(f"[Stream {self.stream_id}] Xóa ID {tid} khỏi phiên (timeout).")
+            for name in names_to_remove_from_session:
+                del self.recently_seen[name]
+                logger.info(f"[Stream {self.stream_id}] Xóa {name} khỏi phiên (timeout).")
+            # === KẾT THÚC SỬA LỖI B ===
 
         # 6. TẠO DỮ LIỆU GỬI ĐI
-        # Gửi toàn bộ danh sách "đã thấy gần đây" (đã được dọn dẹp)
         identities_payload = list(self.recently_seen.values())
         processing_time = time.perf_counter() - start_time
         
@@ -528,9 +477,8 @@ static_dir_path = os.path.join(current_dir, "static")
 app.mount("/static", StaticFiles(directory=static_dir_path), name="static")
 
 try:
-    gallery_fs_path = os.path.dirname(cfg.DATA_ROOT)
-    app.mount("/Gallery", StaticFiles(directory=gallery_fs_path), name="Gallery")
-    logger.info(f"Serving static gallery images from: {gallery_fs_path}")
+    app.mount("/gallery_images", StaticFiles(directory=cfg.DATA_ROOT), name="gallery_images")
+    logger.info(f"Serving static gallery images from: {cfg.DATA_ROOT}")
 except Exception as e:
     logger.error(f"Failed to mount gallery directory: {e}. Thumbnails will NOT load.")
 
@@ -585,8 +533,8 @@ HTML = """
             border-left: 2px solid #444;
         }
         .sidebar-wrapper {
-             overflow-y: auto; /* Cho phép cuộn nếu danh sách quá dài */
-             flex-grow: 1;
+            overflow-y: auto; /* Cho phép cuộn nếu danh sách quá dài */
+            flex-grow: 1;
         }
         .sidebar-stream-group {
             border-bottom: 1px dashed #555;

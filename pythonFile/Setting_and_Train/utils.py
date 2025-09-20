@@ -8,36 +8,53 @@ import numpy as np
 from torchvision import transforms, datasets
 from torch.utils.data import DataLoader
 import cv2
-from ultralytics import YOLO
+from retinaface import RetinaFace   
 from skimage import transform as trans
 
 from config import cfg
 
 class FaceDetector:
-    def __init__(self, model_path=cfg.DETECTOR_MODEL_PATH):
-        self.model = YOLO(model_path)
+    def __init__(self):
+        # Thư viện RetinaFace tự động xử lý việc tải model
+        # nên chúng ta không cần truyền đường dẫn vào nữa.
+        print("Initialized RetinaFace detector.")
 
     def detect(self, image_np):
-        results = self.model(image_np, device=cfg.DEVICE, verbose=False)
+        """
+        Phát hiện khuôn mặt bằng RetinaFace và trả về boxes, landmarks
+        theo đúng định dạng mà hệ thống đang cần.
+        """
         boxes = []
         landmarks = []
-        for res in results:
-            if res.boxes is None: continue
-            xyxyn = res.boxes.xyxyn.cpu().numpy()
-            confs = res.boxes.conf.cpu().numpy()
+        
+        try:
+            # RetinaFace trả về một dictionary, với mỗi key là một khuôn mặt (ví dụ: 'face_1')
+            # Chúng ta đặt threshold ngay trong lệnh gọi để lọc bớt các phát hiện nhiễu
+            results = RetinaFace.detect_faces(image_np, threshold=cfg.DETECTION_CONFIDENCE)
             
-            if res.keypoints is not None and len(res.keypoints.xy) > 0:
-                keypoints_xy = res.keypoints.xy.cpu().numpy()
-            else: 
-                keypoints_xy = np.zeros((len(xyxyn), 5, 2))
+            if isinstance(results, dict):
+                for face_name, face_info in results.items():
+                    # 1. Lấy bounding box
+                    # Định dạng của 'facial_area' là [x1, y1, x2, y2], đúng như ta cần
+                    box = face_info['facial_area']
+                    # Chuyển đổi sang int để tương thích
+                    boxes.append([int(b) for b in box])
 
-            for i in range(len(xyxyn)):
-                if confs[i] > cfg.DETECTION_CONFIDENCE:
-                    h, w, _ = image_np.shape
-                    x1, y1, x2, y2 = xyxyn[i]
-                    box = [int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)]
-                    boxes.append(box)
-                    landmarks.append(keypoints_xy[i])
+                    # 2. Lấy landmarks theo đúng thứ tự cho hàm align_face
+                    lm = face_info['landmarks']
+                    landmark_points = [
+                        lm['right_eye'],
+                        lm['left_eye'],
+                        lm['nose'],
+                        lm['mouth_right'],
+                        lm['mouth_left']
+                    ]
+                    landmarks.append(np.array(landmark_points, dtype=np.float32))
+
+        except Exception as e:
+            # Nếu không tìm thấy khuôn mặt, thư viện có thể báo lỗi hoặc trả về rỗng.
+            # Trả về list rỗng là hành vi đúng đắn.
+            pass
 
         return boxes, landmarks
 

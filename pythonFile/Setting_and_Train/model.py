@@ -106,7 +106,6 @@ class IResNet(nn.Module):
         self.dropout = nn.Dropout(p=dropout, inplace=True)
         self.fc = nn.Linear(512 * block.expansion * self.fc_scale, num_features)
         self.features = nn.BatchNorm1d(num_features, eps=1e-05)
-        # self.features = nn.LayerNorm(num_features, eps=1e-05)
         nn.init.constant_(self.features.weight, 1.0)
         self.features.weight.requires_grad = False
 

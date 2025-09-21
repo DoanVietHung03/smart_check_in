@@ -4,14 +4,14 @@ import torch
 import numpy as np
 import faiss
 from tqdm import tqdm
-from PIL import Image
-from torchvision import datasets
+from PIL import Image, ImageFilter
+from torchvision import datasets, transforms
 import json
 import sys
 
 from config import cfg
 from model import iresnet34
-from utils import FaceDetector, align_face, get_transforms
+from utils import FaceDetector_YOLO, FaceDetector_RetinaFace, align_face, get_transforms
 
 def build_gallery():
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
@@ -30,7 +30,7 @@ def build_gallery():
     # -----------------------------------------------
 
     # 2. Khởi tạo detector và transform
-    detector = FaceDetector()
+    detector = FaceDetector_RetinaFace()
     _, transform = get_transforms()
 
     # 3. Trích xuất embedding cho gallery
@@ -59,6 +59,7 @@ def build_gallery():
             if len(boxes) >= 1:
                 # Chỉ lấy khuôn mặt lớn nhất (đầu tiên) nếu có nhiều
                 aligned_face = align_face(image_np, landmarks[0], boxes[0])
+                
                 try:
                     # 1. Xử lý ảnh gốc
                     face_tensor_orig = transform(Image.fromarray(aligned_face)).unsqueeze(0).to(cfg.DEVICE)

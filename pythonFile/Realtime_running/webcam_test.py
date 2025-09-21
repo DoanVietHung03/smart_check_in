@@ -18,7 +18,7 @@ sys.path.append(setting_and_train_dir)
 
 from config import cfg
 from model import iresnet34
-from utils import FaceDetector, align_face, get_transforms, load_id2name
+from utils import FaceDetector_YOLO, FaceDetector_RetinaFace, align_face, get_transforms, load_id2name
 from supervision import Detections, ByteTrack
 
 # === CẤU HÌNH ===
@@ -76,11 +76,16 @@ def recognition_worker(device, recognizer_model, faiss_index, id2name, recog_tra
 # ===================================================================
 # LUỒNG CHÍNH: WEBCAM VÀ HIỂN THỊ
 # ===================================================================
+
+# === CẤU HÌNH ===
+WEBCAM_ID = 0 
+CACHE_TTL_SECONDS = 5.0
+
 def main():
     # --- 1. TẢI MODEL VÀ DỮ LIỆU ---
     print("[Main Thread] Loading models and gallery data...")
     device = torch.device(cfg.DEVICE)
-    detector = FaceDetector()
+    detector = FaceDetector_RetinaFace()
     recognizer_model = iresnet34(fp16=False).to(device)
     try:
         ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=device)
@@ -119,68 +124,77 @@ def main():
 
     print("\nStarting webcam feed. Press 'q' to quit.")
     frame_count = 0
+    tracked_detections = Detections.empty()
+
     while True:
         ret, frame = cap.read()
         if not ret: break
 
-        # --- CẬP NHẬT KẾT QUẢ TỪ WORKER (NON-BLOCKING) ---
+        current_time = time.time()
+
+        # --- CẬP NHẬT KẾT QUẢ TỪ WORKER ---
         try:
             new_results = results_queue.get_nowait()
             for tracker_id, (name, score) in new_results.items():
-                tracker_results_cache[tracker_id] = (name, score, time.time())
+                tracker_results_cache[tracker_id] = (name, score, current_time)
         except queue.Empty:
             pass
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        # Chỉ chạy detect/track mỗi 2 frame để giảm tải
         if frame_count % 2 == 0:
             boxes, landmarks = detector.detect(frame_rgb)
             
-            detections_sv = Detections(
-                xyxy=np.array(boxes, dtype=float),
-                confidence=np.ones(len(boxes)),
-                data={'landmarks': landmarks}
-            )
-            
-            tracked_detections = tracker.update_with_detections(detections_sv)
-            
-            faces_to_process = []
-            for i in range(len(tracked_detections)):
-                tracker_id = int(tracked_detections.tracker_id[i])
-
-                # === THÊM ĐIỀU KIỆN KIỂM TRA MỚI ===
-                # Chỉ nhận diện tracker_id mới nếu hàng đợi AI đang rảnh
-                if tracker_id not in tracker_results_cache and recognition_queue.empty():
-                    faces_to_process.append((
-                        tracker_id,
-                        tracked_detections.data['landmarks'][i],
-                        tracked_detections.xyxy[i]
-                    ))
-            
-            if faces_to_process: # Bỏ điều kiện qsize() ở đây
-                recognition_queue.put((frame_rgb.copy(), faces_to_process))
-        
-        # --- VẼ KẾT QUẢ (LUÔN LUÔN CHẠY) ---
-        # (vẽ từ cache, không cần đợi AI xử lý xong)
-        for tracker_id, (name, score, _) in list(tracker_results_cache.items()):
-            # Vẽ box cho các track_id hiện hành
-            # (Bạn có thể thêm logic để vẽ box cho các detection hiện tại khớp với id trong cache)
-            pass # Tạm thời bỏ qua việc vẽ để đơn giản, bạn có thể thêm lại logic vẽ từ các phiên bản trước
-
-        # Vẽ từ tracked_detections của frame hiện tại
-        if 'tracked_detections' in locals():
-            for i in range(len(tracked_detections)):
-                xyxy = tracked_detections.xyxy[i]
-                tracker_id = int(tracked_detections.tracker_id[i])
-                name, score, _ = tracker_results_cache.get(tracker_id, ("Processing...", 0.0, 0))
+            # =========================================================
+            # === SỬA LỖI Ở ĐÂY: Chỉ xử lý nếu phát hiện thấy khuôn mặt ===
+            if len(boxes) > 0:
+                detections_sv = Detections(
+                    xyxy=np.array(boxes, dtype=float),
+                    confidence=np.ones(len(boxes)),
+                    data={'landmarks': landmarks}
+                )
+                tracked_detections = tracker.update_with_detections(detections_sv)
                 
-                label = f"{name} ({score:.2f})"
-                color_bgr = name2color.get(name, (0, 0, 255))
-                x1, y1, x2, y2 = [int(c) for c in xyxy]
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color_bgr, 2)
-                text_y = y1 - 10 if y1 - 10 > 10 else y2 + 20
-                cv2.putText(frame, label, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color_bgr, 2)
+                faces_to_process = []
+                for i in range(len(tracked_detections)):
+                    tracker_id = int(tracked_detections.tracker_id[i])
+                    
+                    needs_recognition = False
+                    cached_result = tracker_results_cache.get(tracker_id)
+
+                    if cached_result is None:
+                        needs_recognition = True
+                    else:
+                        _, _, timestamp = cached_result
+                        if current_time - timestamp > CACHE_TTL_SECONDS:
+                            needs_recognition = True
+                    
+                    if needs_recognition:
+                        faces_to_process.append((
+                            tracker_id,
+                            tracked_detections.data['landmarks'][i],
+                            tracked_detections.xyxy[i]
+                        ))
+                
+                if faces_to_process and recognition_queue.empty():
+                    recognition_queue.put((frame_rgb.copy(), faces_to_process))
+            else:
+                # Nếu không có khuôn mặt nào, cập nhật tracker với một đối tượng rỗng
+                tracked_detections = tracker.update_with_detections(Detections.empty())
+            # =========================================================
+        
+        # --- VẼ KẾT QUẢ ---
+        for i in range(len(tracked_detections)):
+            xyxy = tracked_detections.xyxy[i]
+            tracker_id = int(tracked_detections.tracker_id[i])
+            name, score, _ = tracker_results_cache.get(tracker_id, ("Processing...", 0.0, 0))
+            
+            label = f"{name} ({score:.2f})"
+            color_bgr = name2color.get(name, (0, 0, 255))
+            x1, y1, x2, y2 = [int(c) for c in xyxy]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color_bgr, 2)
+            text_y = y1 - 10 if y1 - 10 > 10 else y2 + 20
+            cv2.putText(frame, label, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color_bgr, 2)
 
         cv2.imshow('Webcam Face Recognition (Press "q" to quit)', frame)
         frame_count += 1
@@ -190,8 +204,8 @@ def main():
 
     # --- 4. DỌN DẸP ---
     print("Shutting down...")
-    recognition_queue.put(None) # Gửi tín hiệu dừng cho worker
-    worker_thread.join()       # Đợi worker kết thúc
+    recognition_queue.put(None)
+    worker_thread.join()
     cap.release()
     cv2.destroyAllWindows()
     print("Program finished.")

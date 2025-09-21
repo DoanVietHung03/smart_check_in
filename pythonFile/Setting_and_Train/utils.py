@@ -9,11 +9,40 @@ from torchvision import transforms, datasets
 from torch.utils.data import DataLoader
 import cv2
 from retinaface import RetinaFace   
+from ultralytics import YOLO
 from skimage import transform as trans
 
 from config import cfg
 
-class FaceDetector:
+class FaceDetector_YOLO:
+    def __init__(self, model_path=cfg.DETECTOR_MODEL_PATH):
+        self.model = YOLO(model_path)
+
+    def detect(self, image_np):
+        results = self.model(image_np, device=cfg.DEVICE, verbose=False)
+        boxes = []
+        landmarks = []
+        for res in results:
+            if res.boxes is None: continue
+            xyxyn = res.boxes.xyxyn.cpu().numpy()
+            confs = res.boxes.conf.cpu().numpy()
+            
+            if res.keypoints is not None and len(res.keypoints.xy) > 0:
+                keypoints_xy = res.keypoints.xy.cpu().numpy()
+            else: 
+                keypoints_xy = np.zeros((len(xyxyn), 5, 2))
+
+            for i in range(len(xyxyn)):
+                if confs[i] > cfg.DETECTION_CONFIDENCE:
+                    h, w, _ = image_np.shape
+                    x1, y1, x2, y2 = xyxyn[i]
+                    box = [int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)]
+                    boxes.append(box)
+                    landmarks.append(keypoints_xy[i])
+
+        return boxes, landmarks
+
+class FaceDetector_RetinaFace:
     def __init__(self):
         # Thư viện RetinaFace tự động xử lý việc tải model
         # nên chúng ta không cần truyền đường dẫn vào nữa.

@@ -48,8 +48,8 @@ setting_and_train_dir = os.path.join(project_root, "Setting_and_Train")
 sys.path.append(setting_and_train_dir)
 
 from config import cfg
-from model import iresnet100
-from utils import align_face, get_transforms, load_id2name
+from model import iresnet34
+from utils import align_face, get_transforms, load_id2name, FaceDetector_YOLO, FaceDetector_RetinaFace
 
 logger.info("Imports completed. Loading models...")
 
@@ -69,19 +69,37 @@ JPEG_QUALITY = 100
 CACHE_TTL_SECONDS = 5.0 # Thời gian xóa cache
 SESSION_TIMEOUT_SECONDS = 300.0 # (5 phút) Xóa người khỏi sidebar nếu không thấy
 
+# ====================== KIỂM TRA CHẤT LƯỢNG ẢNH ======================
+def is_good_quality(face_image: np.ndarray, blur_threshold=100.0, brightness_range=(50, 200)):
+    """Kiểm tra chất lượng của ảnh khuôn mặt đã được align."""
+    if face_image is None or face_image.size == 0: return False
+    # 1. Kiểm tra độ mờ (Blur)
+    gray = cv2.cvtColor(face_image, cv2.COLOR_RGB2GRAY)
+    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+    if laplacian_var < blur_threshold:
+        return False # Ảnh quá mờ
+
+    # 2. Kiểm tra độ sáng (Brightness)
+    brightness = np.mean(gray)
+    min_bright, max_bright = brightness_range
+    if not (min_bright < brightness < max_bright):
+        return False # Ảnh quá tối hoặc quá sáng
+
+    return True
+
 # ===================== TẢI MODEL TOÀN CỤC =========================
 DEVICE = torch.device(cfg.DEVICE)
 
 # 1. Detector
-DETECTOR_MODEL = YOLO(cfg.DETECTOR_MODEL_PATH).to(DEVICE)
-DETECTOR_MODEL.fuse()
-logger.info("Global Face Detector (YOLO) loaded.")
+# DETECTOR_MODEL = YOLO(cfg.DETECTOR_MODEL_PATH).to(DEVICE)
+# DETECTOR_MODEL.fuse()
+DETECTOR_MODEL = FaceDetector_RetinaFace()
+logger.info("Global Face Detector (RetinaFace) loaded.")   
 
 # 2. Recognizer
-RECOGNIZER_MODEL = iresnet100(fp16=False).to(DEVICE)
+RECOGNIZER_MODEL = iresnet34(fp16=False).to(DEVICE)
 ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=DEVICE)
-RECOGNIZER_MODEL.load_state_dict(ckpt, strict=False)
-# --------------------
+RECOGNIZER_MODEL.load_state_dict(ckpt, strict=True)
 RECOGNIZER_MODEL.eval()
 logger.info(f"Global Face Recognizer (iResNet) loaded from: {cfg.PRETRAINED_RECOGNITION_MODEL_PATH}")
 

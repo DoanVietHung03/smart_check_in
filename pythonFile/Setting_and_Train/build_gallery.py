@@ -59,24 +59,37 @@ def build_gallery():
             if len(boxes) >= 1:
                 # Chỉ lấy khuôn mặt lớn nhất (đầu tiên) nếu có nhiều
                 aligned_face = align_face(image_np, landmarks[0], boxes[0])
-                
+                aligned_pil = Image.fromarray(aligned_face) # Chuyển sang PIL Image để transform
+
+                # Định nghĩa các phép biến đổi nhẹ
+                augment_transforms = transforms.Compose([
+                    transforms.RandomAffine(degrees=10, translate=(0.05, 0.05), scale=(0.95, 1.05)),
+                    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+                ])
+    
                 try:
                     # 1. Xử lý ảnh gốc
                     face_tensor_orig = transform(Image.fromarray(aligned_face)).unsqueeze(0).to(cfg.DEVICE)
                     with torch.no_grad():
-                        feat_orig = model(face_tensor_orig).cpu().numpy()
+                        feat_orig = model(face_tensor_orig).cpu().detach().numpy()
                     
                     all_feats.append(feat_orig)
                     all_labels.append(label_idx)
 
-                    # 2. Xử lý ảnh lật ngang (Flipped)
-                    aligned_face_flipped = np.fliplr(aligned_face).copy()
-                    face_tensor_flipped = transform(Image.fromarray(aligned_face_flipped)).unsqueeze(0).to(cfg.DEVICE)
+                    # 2. Xử lý ảnh lật (Flipped)
+                    aligned_face_flipped = transforms.functional.hflip(aligned_pil)
+                    face_tensor_flipped = transform(aligned_face_flipped).unsqueeze(0).to(cfg.DEVICE)
                     with torch.no_grad():
-                        feat_flipped = model(face_tensor_flipped).cpu().numpy()
+                        feat_flipped = model(face_tensor_flipped).cpu().detach().numpy()
                     
                     all_feats.append(feat_flipped)
                     all_labels.append(label_idx) # Vẫn là label đóng góp bởi cùng một người
+                    
+                    for _ in range(8):
+                        augmented_pil = augment_transforms(aligned_pil)
+                        feat_aug = model(transform(augmented_pil).unsqueeze(0).to(cfg.DEVICE)).cpu().detach().numpy()
+                        all_feats.append(feat_aug)
+                        all_labels.append(label_idx)
                     
                     # Lưu ảnh đã căn chỉnh
                     person_name = class_names[label_idx]

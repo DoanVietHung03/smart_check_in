@@ -1,4 +1,3 @@
-# webcam_test.py (PHIÊN BẢN NÂNG CẤP - BẤT ĐỒNG BỘ)
 import cv2
 import torch
 import faiss
@@ -19,10 +18,7 @@ sys.path.append(setting_and_train_dir)
 from config import cfg
 from model import iresnet34
 from utils import FaceDetector_YOLO, FaceDetector_RetinaFace, align_face, get_transforms, load_id2name
-from supervision import Detections, ByteTrack
-
-# === CẤU HÌNH ===
-WEBCAM_ID = 0 
+from supervision import Detections, ByteTrack 
 
 # Hàng đợi để giao tiếp giữa các luồng
 recognition_queue = queue.Queue()
@@ -85,7 +81,14 @@ def main():
     # --- 1. TẢI MODEL VÀ DỮ LIỆU ---
     print("[Main Thread] Loading models and gallery data...")
     device = torch.device(cfg.DEVICE)
-    detector = FaceDetector_RetinaFace()
+    if cfg.DETECTOR_TYPE == 'yolo':
+        detector = FaceDetector_YOLO()
+        print("[Main Thread] Using YOLO detector.")
+    elif cfg.DETECTOR_TYPE == 'retinaface':
+        detector = FaceDetector_RetinaFace()
+        print("[Main Thread] Using RetinaFace detector.")
+    else:
+        raise ValueError("Invalid DETECTOR_TYPE in config.py. Choose 'yolo' or 'retinaface'.")
     recognizer_model = iresnet34(fp16=False).to(device)
     try:
         ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=device)

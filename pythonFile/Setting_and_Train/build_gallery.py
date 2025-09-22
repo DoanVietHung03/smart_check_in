@@ -29,8 +29,16 @@ def build_gallery():
     model.eval()
     # -----------------------------------------------
 
-    # 2. Khởi tạo detector và transform
-    detector = FaceDetector_RetinaFace()
+    # 2. Khởi tạo detector và transform dựa trên lựa chọn trong config
+    if cfg.DETECTOR_TYPE == 'yolo':
+        detector = FaceDetector_YOLO()
+        print("Using YOLO for face detection.")
+    elif cfg.DETECTOR_TYPE == 'retinaface':
+        detector = FaceDetector_RetinaFace()
+        print("Using RetinaFace for face detection.")
+    else:
+        raise ValueError("Invalid DETECTOR_TYPE in config.py. Choose 'yolo' or 'retinaface'.")
+    
     _, transform = get_transforms()
 
     # 3. Trích xuất embedding cho gallery

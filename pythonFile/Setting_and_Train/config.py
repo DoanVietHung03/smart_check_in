@@ -3,6 +3,10 @@ import torch
 import os
 
 class Config:
+    # --- Lựa chọn Model Detector ---
+    # Thay đổi giá trị này thành 'yolo' hoặc 'retinaface'
+    DETECTOR_TYPE = 'retinaface'
+    
     # --- Paths ---
     BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # Lấy thư mục gốc của dự án
     DATA_ROOT = os.path.join(BASE_DIR, "..", "..", "Gallery")
@@ -10,7 +14,7 @@ class Config:
     OUTPUT_DIR = os.path.join(BASE_DIR, "..", "..", "checkpoints")
     
     # Các đường dẫn khác sẽ tự động đúng
-    DETECTOR_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_detection_yolo", "yolov11n-face.pt")
+    DETECTOR_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_detection_yolo", "yolov11n-face.pt") # <---- Đường dẫn này chỉ được sử dụng nếu DETECTOR_TYPE = 'yolo'
     PRETRAINED_RECOGNITION_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_recognition_iresnet", "arcFace_r34.pth")
     BEST_FINETUNED_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_finetuned_model.pth")
 

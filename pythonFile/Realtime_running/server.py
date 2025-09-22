@@ -91,10 +91,14 @@ def is_good_quality(face_image: np.ndarray, blur_threshold=100.0, brightness_ran
 DEVICE = torch.device(cfg.DEVICE)
 
 # 1. Detector
-# DETECTOR_MODEL = YOLO(cfg.DETECTOR_MODEL_PATH).to(DEVICE)
-# DETECTOR_MODEL.fuse()
-DETECTOR_MODEL = FaceDetector_RetinaFace()
-logger.info("Global Face Detector (RetinaFace) loaded.")   
+if cfg.DETECTOR_TYPE == 'yolo':
+    DETECTOR_MODEL = FaceDetector_YOLO()
+    logger.info("Global Face Detector (YOLO) loaded.")
+elif cfg.DETECTOR_TYPE == 'retinaface':
+    DETECTOR_MODEL = FaceDetector_RetinaFace()
+    logger.info("Global Face Detector (RetinaFace) loaded.")
+else:
+    raise ValueError("Invalid DETECTOR_TYPE in config.py. Choose 'yolo' or 'retinaface'.") 
 
 # 2. Recognizer
 RECOGNIZER_MODEL = iresnet34(fp16=False).to(DEVICE)
@@ -299,7 +303,6 @@ class VideoProcessor:
                     nh, nw = int(h * RESIZE_PERCENT / 100), int(w * RESIZE_PERCENT / 100)
                     frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
                 self.frame_buffer.put(frame)
-                cv2.waitKey(1)
             cap.release()
 
     def start_reader(self):
@@ -346,10 +349,24 @@ class VideoProcessor:
             if ids_to_remove: logger.info(f"[CACHE] Dọn dẹp {len(ids_to_remove)} ID quá hạn.")
 
         # 2. Detect & Track
-        results = self.detector(frame_rgb, device=DEVICE, verbose=False, conf=cfg.DETECTION_CONFIDENCE)[0]
-        detections_sv = Detections.from_ultralytics(results)
-        landmarks = results.keypoints.xy.cpu().numpy() if results.keypoints is not None and len(results.keypoints.xy) > 0 else np.zeros((len(detections_sv), 5, 2))
-        detections_sv.data['landmarks'] = landmarks
+        if cfg.DETECTOR_TYPE == 'yolo':
+            results = self.detector.model(frame_rgb, device=DEVICE, verbose=False, conf=cfg.DETECTION_CONFIDENCE)[0]
+            detections_sv = Detections.from_ultralytics(results)
+            if results.keypoints is not None and len(results.keypoints.xy) > 0:
+                detections_sv.data['landmarks'] = results.keypoints.xy.cpu().numpy()
+            else: # Nếu không có landmarks, tạo mảng rỗng
+                detections_sv.data['landmarks'] = np.zeros((len(detections_sv), 5, 2))
+        else: # retinaface
+            boxes, landmarks = self.detector.detect(frame_rgb)
+            if len(boxes) > 0:
+                detections_sv = Detections(
+                    xyxy=np.array(boxes, dtype=float),
+                    confidence=np.ones(len(boxes)),
+                    data={'landmarks': landmarks}
+                )
+            else:
+                detections_sv = Detections.empty()
+                
         tracked_detections = self.tracker.update_with_detections(detections_sv)
 
         faces_to_process_queue = []
@@ -501,8 +518,7 @@ except Exception as e:
     logger.error(f"Failed to mount gallery directory: {e}. Thumbnails will NOT load.")
 
 # HTML giao diện
-HTML = """
-<!doctype html>
+HTML = """<!doctype html>
 <html>
 <head>
     <meta charset='utf-8'>
@@ -602,7 +618,7 @@ HTML = """
             </div>
         </div>
     </div>
-    <script src='./static/main.js'></script>
+    <script src='/static/main.js'></script>
 </body>
 </html>
 """

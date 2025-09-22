@@ -17,7 +17,7 @@ import queue
 import uvicorn
 import base64
 import json
-from collections import deque, Counter # <-- ĐÃ THÊM COUNTER
+from collections import deque, Counter 
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
@@ -68,24 +68,6 @@ USE_LATEST_ONLY = True
 JPEG_QUALITY = 100
 CACHE_TTL_SECONDS = 5.0 # Thời gian xóa cache
 SESSION_TIMEOUT_SECONDS = 300.0 # (5 phút) Xóa người khỏi sidebar nếu không thấy
-
-# ====================== KIỂM TRA CHẤT LƯỢNG ẢNH ======================
-def is_good_quality(face_image: np.ndarray, blur_threshold=100.0, brightness_range=(50, 200)):
-    """Kiểm tra chất lượng của ảnh khuôn mặt đã được align."""
-    if face_image is None or face_image.size == 0: return False
-    # 1. Kiểm tra độ mờ (Blur)
-    gray = cv2.cvtColor(face_image, cv2.COLOR_RGB2GRAY)
-    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    if laplacian_var < blur_threshold:
-        return False # Ảnh quá mờ
-
-    # 2. Kiểm tra độ sáng (Brightness)
-    brightness = np.mean(gray)
-    min_bright, max_bright = brightness_range
-    if not (min_bright < brightness < max_bright):
-        return False # Ảnh quá tối hoặc quá sáng
-
-    return True
 
 # ===================== TẢI MODEL TOÀN CỤC =========================
 DEVICE = torch.device(cfg.DEVICE)
@@ -232,7 +214,7 @@ def recognition_worker_thread():
 
 # ====================== VIDEO PROCESSOR CLASS ======================
 class VideoProcessor:
-    def __init__(self, stream_source, stream_id, shared_detector: YOLO):
+    def __init__(self, stream_source, stream_id, shared_detector):
         self.stream_source = stream_source
         self.stream_id = stream_id
         self.detector = shared_detector # Dùng chung detector

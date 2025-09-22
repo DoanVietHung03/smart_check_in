@@ -11,6 +11,10 @@ import cv2
 from retinaface import RetinaFace   
 from ultralytics import YOLO
 from skimage import transform as trans
+import logging
+# ====================== LOGGING ======================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('FaceRec-Server')
 
 from config import cfg
 
@@ -81,8 +85,7 @@ class FaceDetector_RetinaFace:
                     landmarks.append(np.array(landmark_points, dtype=np.float32))
 
         except Exception as e:
-            # Nếu không tìm thấy khuôn mặt, thư viện có thể báo lỗi hoặc trả về rỗng.
-            # Trả về list rỗng là hành vi đúng đắn.
+            logging.info(f"\nRetinaFace detection error: {e}\n")
             pass
 
         return boxes, landmarks

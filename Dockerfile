@@ -28,5 +28,8 @@ COPY checkpoints /app/checkpoints
 # Thông báo cổng FastAPI sẽ chạy 
 EXPOSE 8000
 
+# Dọn dẹp cache của PyTorch để tránh lỗi file hỏng
+RUN rm -rf /root/.cache/torch
+
 # Lệnh mặc định để chạy Realtime_running.py
 CMD ["python", "-m", "pythonFile.Realtime_running.server"]

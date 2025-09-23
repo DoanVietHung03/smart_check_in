@@ -8,7 +8,7 @@ import numpy as np
 from torchvision import transforms, datasets
 from torch.utils.data import DataLoader
 import cv2
-from retinaface import RetinaFace   
+from retinaface.pre_trained_models import get_model  
 from ultralytics import YOLO
 from skimage import transform as trans
 import logging
@@ -47,10 +47,24 @@ class FaceDetector_YOLO:
         return boxes, landmarks
 
 class FaceDetector_RetinaFace:
+    _model_loaded = False
+    
     def __init__(self):
         # Thư viện RetinaFace tự động xử lý việc tải model
         # nên chúng ta không cần truyền đường dẫn vào nữa.
-        print("Initialized RetinaFace detector.")
+        if not FaceDetector_RetinaFace._model_loaded:
+            logger.info("Initializing RetinaFace-PyTorch detector for the first time...")
+            
+        self.model = get_model(
+            model_name="resnet50_2020-07-20", 
+            max_size=1024, 
+            device=cfg.DEVICE
+        )
+        self.model.eval() # Chuyển model sang chế độ inference
+        
+        if not FaceDetector_RetinaFace._model_loaded:
+            logger.info("RetinaFace-PyTorch detector initialized successfully.")
+            FaceDetector_RetinaFace._model_loaded = True
 
     def detect(self, image_np):
         """
@@ -63,26 +77,21 @@ class FaceDetector_RetinaFace:
         try:
             # RetinaFace trả về một dictionary, với mỗi key là một khuôn mặt (ví dụ: 'face_1')
             # Chúng ta đặt threshold ngay trong lệnh gọi để lọc bớt các phát hiện nhiễu
-            results = RetinaFace.detect_faces(image_np, threshold=cfg.DETECTION_CONFIDENCE)
+            if image_np is None or not isinstance(image_np, np.ndarray) or image_np.ndim != 3 or image_np.shape[2] != 3:
+                logger.warning(f"Invalid input image format. Shape: {image_np.shape if image_np is not None else 'None'}. Skipping detection.")
+                return [], []
+            image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+            annotations = self.model.predict_jsons(image_bgr, confidence_threshold=cfg.DETECTION_CONFIDENCE)
             
-            if isinstance(results, dict):
-                for face_name, face_info in results.items():
-                    # 1. Lấy bounding box
-                    # Định dạng của 'facial_area' là [x1, y1, x2, y2], đúng như ta cần
-                    box = face_info['facial_area']
-                    # Chuyển đổi sang int để tương thích
-                    boxes.append([int(b) for b in box])
+            for face_info in annotations:
+                # 1. Lấy bounding box [x1, y1, x2, y2]
+                box = face_info['bbox']
+                boxes.append([int(b) for b in box])
 
-                    # 2. Lấy landmarks theo đúng thứ tự cho hàm align_face
-                    lm = face_info['landmarks']
-                    landmark_points = [
-                        lm['right_eye'],
-                        lm['left_eye'],
-                        lm['nose'],
-                        lm['mouth_right'],
-                        lm['mouth_left']
-                    ]
-                    landmarks.append(np.array(landmark_points, dtype=np.float32))
+                # 2. Lấy landmarks
+                # Thư viện này trả về landmarks đã theo đúng thứ tự
+                landmark_points = face_info['landmarks']
+                landmarks.append(np.array(landmark_points, dtype=np.float32))
 
         except Exception as e:
             logging.info(f"\nRetinaFace detection error: {e}\n")

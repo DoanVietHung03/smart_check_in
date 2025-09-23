@@ -62,10 +62,10 @@ RTSP_URLS = [
 ]
 
 # IO / Model
-RESIZE_PERCENT = 80
+RESIZE_PERCENT = 70
 LOST_TRACK_BUFFER = 50
 USE_LATEST_ONLY = True
-JPEG_QUALITY = 100
+JPEG_QUALITY = 80
 CACHE_TTL_SECONDS = 5.0 # Thời gian xóa cache
 SESSION_TIMEOUT_SECONDS = 300.0 # (5 phút) Xóa người khỏi sidebar nếu không thấy
 
@@ -340,11 +340,18 @@ class VideoProcessor:
                 detections_sv.data['landmarks'] = np.zeros((len(detections_sv), 5, 2))
         else: # retinaface
             boxes, landmarks = self.detector.detect(frame_rgb)
-            if len(boxes) > 0:
+            valid_detections_data = [
+                (box, landmark) for box, landmark in zip(boxes, landmarks) if box
+            ]
+
+            if valid_detections_data:
+                # Unzip the filtered data back into separate lists
+                valid_boxes, valid_landmarks = zip(*valid_detections_data)
+                
                 detections_sv = Detections(
-                    xyxy=np.array(boxes, dtype=float),
-                    confidence=np.ones(len(boxes)),
-                    data={'landmarks': landmarks}
+                    xyxy=np.array(valid_boxes, dtype=float),
+                    confidence=np.ones(len(valid_boxes)),
+                    data={'landmarks': np.array(valid_landmarks)}
                 )
             else:
                 detections_sv = Detections.empty()

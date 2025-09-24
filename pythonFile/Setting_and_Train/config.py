@@ -13,8 +13,8 @@ class Config:
     OUTPUT_DIR = os.path.join(BASE_DIR, "..", "..", "checkpoints")
     
     # Các đường dẫn khác sẽ tự động đúng
-    DETECTOR_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_detection_yolo", "yolov11n-face.pt") # <---- Đường dẫn này chỉ được sử dụng nếu DETECTOR_TYPE = 'yolo'
-    PRETRAINED_RECOGNITION_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_recognition_iresnet", "arcFace_r34.pth")
+    DETECTOR_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_detection", "yolov11n-face.pt") # <---- Đường dẫn này chỉ được sử dụng nếu DETECTOR_TYPE = 'yolo'
+    PRETRAINED_RECOGNITION_MODEL_PATH = os.path.join(WEIGHTS_DIR, "Face_recognition", "arcFace_r50.pth")
     BEST_FINETUNED_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_finetuned_model.pth")
 
     FAISS_INDEX_PATH = os.path.join(OUTPUT_DIR, "faiss_gallery.idx")

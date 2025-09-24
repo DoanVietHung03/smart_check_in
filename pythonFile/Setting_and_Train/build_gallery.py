@@ -9,14 +9,14 @@ import json
 import sys
 
 from config import cfg
-from model import iresnet34
+from model import iresnet50
 from utils import FaceDetector_YOLO, FaceDetector_RetinaFace, align_face, get_transforms
 
 def build_gallery():
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     
     # 1. Load model nhận diện khuôn mặt
-    model = iresnet34(fp16=False).to(cfg.DEVICE)
+    model = iresnet50(fp16=False).to(cfg.DEVICE)
     try:
         ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=cfg.DEVICE)
         model.load_state_dict(ckpt, strict=True)

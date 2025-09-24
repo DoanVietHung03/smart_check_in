@@ -47,7 +47,7 @@ setting_and_train_dir = os.path.join(project_root, "Setting_and_Train")
 sys.path.append(setting_and_train_dir)
 
 from config import cfg
-from model import iresnet34
+from model import iresnet50
 from utils import align_face, get_transforms, load_id2name, FaceDetector_YOLO, FaceDetector_RetinaFace
 
 logger.info("Imports completed. Loading models...")
@@ -82,7 +82,7 @@ else:
     raise ValueError("Invalid DETECTOR_TYPE in config.py. Choose 'yolo' or 'retinaface'.") 
 
 # 2. Recognizer
-RECOGNIZER_MODEL = iresnet34(fp16=False).to(DEVICE)
+RECOGNIZER_MODEL = iresnet50(fp16=False).to(DEVICE)
 ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=DEVICE)
 RECOGNIZER_MODEL.load_state_dict(ckpt, strict=True)
 RECOGNIZER_MODEL.eval()

@@ -1,4 +1,3 @@
-# build_gallery.py
 import os
 import torch
 import numpy as np

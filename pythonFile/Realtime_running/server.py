@@ -1,4 +1,3 @@
-# main.py (ĐÃ TÍCH HỢP LOGIC NHẬN DẠNG KHUÔN MẶT)
 import warnings
 warnings.filterwarnings('ignore')
 

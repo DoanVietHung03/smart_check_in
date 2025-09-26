@@ -66,7 +66,7 @@ LOST_TRACK_BUFFER = 100
 USE_LATEST_ONLY = True
 JPEG_QUALITY = 100
 CACHE_TTL_SECONDS = 5.0 # Thời gian xóa cache
-SESSION_TIMEOUT_SECONDS = 300.0 # (5 phút) Xóa người khỏi sidebar nếu không thấy
+SESSION_TIMEOUT_SECONDS = 120.0 # (2 phút) Xóa người khỏi sidebar nếu không thấy
 
 # ===================== TẢI MODEL TOÀN CỤC =========================
 DEVICE = torch.device(cfg.DEVICE)

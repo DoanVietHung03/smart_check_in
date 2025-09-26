@@ -50,8 +50,6 @@ class FaceDetector_RetinaFace:
     _model_loaded = False
     
     def __init__(self):
-        # Thư viện RetinaFace tự động xử lý việc tải model
-        # nên chúng ta không cần truyền đường dẫn vào nữa.
         if not FaceDetector_RetinaFace._model_loaded:
             logger.info("Initializing RetinaFace-PyTorch detector for the first time...")
             

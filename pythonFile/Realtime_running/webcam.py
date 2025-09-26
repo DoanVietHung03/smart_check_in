@@ -16,7 +16,7 @@ setting_and_train_dir = os.path.join(project_root, "Setting_and_Train")
 sys.path.append(setting_and_train_dir)
 
 from config import cfg
-from model import iresnet34
+from model import iresnet50
 from utils import FaceDetector_YOLO, FaceDetector_RetinaFace, align_face, get_transforms, load_id2name
 from supervision import Detections, ByteTrack 
 
@@ -89,7 +89,7 @@ def main():
         print("[Main Thread] Using RetinaFace detector.")
     else:
         raise ValueError("Invalid DETECTOR_TYPE in config.py. Choose 'yolo' or 'retinaface'.")
-    recognizer_model = iresnet34(fp16=False).to(device)
+    recognizer_model = iresnet50(fp16=False).to(device)
     try:
         ckpt = torch.load(cfg.PRETRAINED_RECOGNITION_MODEL_PATH, map_location=device)
         recognizer_model.load_state_dict(ckpt, strict=True)
@@ -147,9 +147,6 @@ def main():
         
         if frame_count % 2 == 0:
             boxes, landmarks = detector.detect(frame_rgb)
-            
-            # =========================================================
-            # === SỬA LỖI Ở ĐÂY: Chỉ xử lý nếu phát hiện thấy khuôn mặt ===
             if len(boxes) > 0:
                 detections_sv = Detections(
                     xyxy=np.array(boxes, dtype=float),
@@ -184,7 +181,6 @@ def main():
             else:
                 # Nếu không có khuôn mặt nào, cập nhật tracker với một đối tượng rỗng
                 tracked_detections = tracker.update_with_detections(Detections.empty())
-            # =========================================================
         
         # --- VẼ KẾT QUẢ ---
         for i in range(len(tracked_detections)):

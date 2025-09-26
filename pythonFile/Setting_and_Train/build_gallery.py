@@ -71,8 +71,7 @@ def build_gallery():
                 # Định nghĩa các phép biến đổi nhẹ
                 augment_transforms = transforms.Compose([
                     transforms.RandomAffine(degrees=10, translate=(0.05, 0.05), scale=(0.95, 1.05)),
-                    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-                    transforms.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0))
+                    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2)
                 ])
     
                 try:

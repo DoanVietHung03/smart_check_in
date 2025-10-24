@@ -112,7 +112,7 @@ def build_gallery():
             print(f"Skipping {path} due to error: {e}")
 
     if not all_feats:
-        print("FATAL: No features extracted. Cannot build gallery. Did you add photos to Dataset_Recognition/train/?")
+        print("FATAL: No features extracted. Cannot build gallery. Did you add photos to Gallery/?")
         return
     
     # Sử dụng TẤT CẢ các feats. 
